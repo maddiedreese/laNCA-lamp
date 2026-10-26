@@ -59,9 +59,10 @@ def test_gradients_reach_network_and_constants():
         assert torch.isfinite(param.grad).all(), name
     grads = dict(zip(model.physics.names, model.physics.raw.grad))
     # Constants used after the flow solve get gradients even without flow_grad...
-    assert grads["cohesion"] != 0 and grads["compress"] != 0 and grads["heat_rate"] != 0
-    # ...but the ones that only shape the flow need flow_grad.
-    assert grads["mobility"] == 0
+    assert grads["compress"] != 0 and grads["heat_rate"] != 0
+    # ...but the ones that only shape the flow need flow_grad, and surface tension passes
+    # gradients straight through (see physics.apply_tension).
+    assert grads["mobility"] == 0 and grads["tension"] == 0
 
     model.zero_grad()
     _, waxes = model.rollout(state, geom, 5, 0.5, torch.Generator().manual_seed(0), flow_grad=True)

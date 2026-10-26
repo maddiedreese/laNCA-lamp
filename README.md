@@ -62,25 +62,28 @@ regenerated locally.
 - **Transport** of wax and heat by conservative upwind fluxes: wax stays in [0, 1] and its
   total is exact to float rounding. Interface compression after each substep cancels the
   smearing that upwind transport causes, in proportion to the flow.
-- **Cohesion**: a bounded, conservative wax/liquid exchange that pulls wax toward denser wax
-  nearby, standing in for surface tension.
+- **Surface tension**, Cahn-Hilliard style: wax flows down a chemical potential that is high
+  on bumps and thin bits, which shortens outlines, rounds blobs and drives pinch-off. It is a
+  conservative, bounded exchange, explicit and stiff (hundreds of cheap substeps per step);
+  gradients pass straight through it unless asked for.
 - **Heat**: conduction (different for wax and liquid), a bulb under the base, and cooling
   through the walls and cap. Hot wax rises, cold wax sinks.
 
-The 13 physical constants live in `physics.Params`, bounded and ready to fit in Phase 5.
+The 14 physical constants live in `physics.Params`, bounded and ready to fit in Phase 5.
 
 ```bash
 uv run python -m lanca.baseline --name default            # physics alone, from the real cold start
-uv run python -m lanca.baseline --set cohesion=8 mobility=6 --name test --threads 2
+uv run python -m lanca.baseline --constants fits/tension.json --name tension
 ```
 
 The baseline writes simulated masks, temperature snapshots, stats and a side-by-side video to
-`runs/physics/<name>/`. A 2-hour run takes about 4-8 minutes on the Mac mini's CPU.
+`runs/physics/<name>/`. A 2-hour run takes about 20 minutes on the Mac mini's CPU (surface
+tension's substeps; it was 4-8 minutes before).
 
-**Status.** The guarantees hold (`tests/test_physics.py`). With the default constants, the
-physics alone warms up, sends wax up and down for the whole run with a pool at the bottom,
-and keeps wax as sharp-edged blobs. The simulation is chaotic, so repeated runs differ a
-little; the range below is from two runs. Against the footage (cycling phase):
+**Status (before surface tension, with cohesion instead).** The guarantees hold
+(`tests/test_physics.py`). The physics alone warmed up, sent wax up and down for the whole
+run with a pool at the bottom, and kept wax as sharp-edged blobs. Runs are chaotic, so
+repeats differ a little; the range is from two runs. See Phase 5 for the current numbers.
 
 | | real | baseline |
 |---|---|---|
@@ -91,9 +94,8 @@ little; the range below is from two runs. Against the footage (cycling phase):
 | typical blob size (fraction of glass) | 0.083 | 0.005-0.008 |
 | merges per minute | 8.5 | 6.6-9.5 |
 
-What is still wrong: wax breaks into many small, angular pieces instead of two or three big
-round blobs, and it moves at about a third of the real speed. Phase 4's learned flow and
-exchange, and Phase 5's constant fitting, are meant to close those gaps.
+Wax broke into many small, angular pieces instead of two or three big round blobs, and moved
+at about a third of the real speed; surface tension (Phase 5) fixed most of the first.
 
 ## Phase 4: the learned model
 
@@ -108,9 +110,9 @@ and height channels. A small per-cell network (about 16k weights) outputs:
 - **hidden-channel updates**, the model's memory.
 
 `physics.advance` applies everything, so wax is conserved exactly and stays in [0, 1]
-whatever the network outputs. Each step a random half of the cells apply their exchange and
-hidden updates, with a little noise; the flow correction applies everywhere so the flow stays
-smooth. The last layer starts at zero, so an untrained model is exactly the physics baseline.
+whatever the network outputs. Each step a random half of the cells apply their hidden
+updates, with a little noise; flow and exchange apply everywhere (a random on/off pattern on
+exchange shredded blobs into foam over long runs). The last layer starts at zero, so an untrained model is exactly the physics baseline.
 
 `model.rollout` runs many steps, with optional gradient checkpointing for long rollouts.
 Gradients reach the network and the physical constants; `flow_grad=True` also
@@ -138,6 +140,59 @@ cycling phase, and measures error on fixed held-out windows from the last 15 min
 So the wiring works end to end: the model learns from real footage, steadily and stably.
 These are short windows from a smooth starting temperature; the real training (longer
 rollouts, temperature warm-up, behavior statistics, fitting the constants) is Phase 5.
+
+## Phase 5: training
+
+```bash
+uv run python -m lanca.fit_constants --generations 6 --population 8 --workers 4   # stage A
+uv run python -m lanca.train --stage B --name stage_b --iters 400                 # stage B
+uv run python -m lanca.baseline --checkpoint runs/train/stage_b/best.pt --name trained
+```
+
+- **Stage A** (`fit_constants.py`): derivative-free search (cross-entropy method) over 9
+  constants, scoring full 2-hour physics runs against the footage's stats. Best constants go
+  to `runs/fit/constants.json` (copied to `fits/stage_a.json`). The search's best score was partly luck (each candidate ran
+  once, and runs are chaotic); a fresh run showed modest gains (rise speed 0.0078 -> 0.0097,
+  period 129-140 s -> 122 s). Better fits need several runs per candidate.
+- **Stage B** (`train.py`): trains the network on windows from the whole recording, each
+  started at the baseline's temperature for that minute and warmed up on real frames, plus a
+  pool of the model's own long runs scored against the real lamp at the same age.
+  Losses: frame error plus behavior statistics (`losses.py`: sharpness, edges, spectrum,
+  activity, vertical profile).
+- **Stage C**: joint fine-tune. Without gradients through the flow solve it can only move
+  the minor constants, and it didn't improve on stage B.
+
+- **Surface tension.** Measurements showed the physics itself was too ragged (edge per unit
+  wax 0.46 vs 0.13 real), because cohesion pulled wax together without shortening outlines.
+  Replacing it with Cahn-Hilliard surface tension, then setting tension and mobility from
+  short runs and two 2-hour runs, gave the best physics so far
+  (`fits/tension.json`).
+
+Results, 2-hour free runs from the cold start (score: stage A's weighted log-error, lower is
+better):
+
+| | real | fitted physics, cohesion | tension physics | trained on tension physics |
+|---|---|---|---|---|
+| score | - | 13.4 | **9.0** | 10.1 |
+| first blob | 812 s | 487 s | 1126 s | 1444 s |
+| regular cycling from | 2831 s | 1353 s | 2028 s | 1794 s |
+| cycle period | 66 s | 122 s | **78 s** | 95 s |
+| rise speed (lamp heights/s) | 0.023 | 0.0097 | 0.0071 | 0.0084 |
+| typical blob size | 0.083 | 0.009 | 0.018 | 0.014 |
+| merges per minute | 8.5 | 6.3 | 5.0 | 6.6 |
+| edge per unit wax | 0.13 | 0.46 | 0.32 | 0.33 |
+
+With surface tension the blobs are smooth and solid, the cold pool holds through warm-up, and
+the cycle period is within 20% of the real lamp. Still off: blobs are about 5x too small and
+tend to hug the walls, and wax rises about 3x too slowly.
+
+The network trained on top of the tension physics barely learned: its held-out behavior error
+stayed flat (about 0.39) for all 400 iterations, and in 2-hour runs it is slightly worse than
+the physics alone (faster, more realistic merging, but smaller blobs and a slower cycle). The
+likely reason is the straight-through gradient: tension reshapes wax every step, but the
+network's gradients can't see that, so its shape corrections get smoothed away without it
+learning why. An earlier network trained on the cohesion physics improved short-window
+behavior error by 45% but shredded wax in long runs.
 
 ## Footage
 

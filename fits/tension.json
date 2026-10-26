@@ -1,0 +1,29 @@
+{
+  "constants": {
+    "mobility": 8.0,
+    "buoy_wax": 18.613894875795783,
+    "heat_rate": 0.011133780316350726,
+    "cool_cap": 0.011352940528437968,
+    "cool_wall": 0.0007338937311700344,
+    "visc_wax": 163.6811163952744,
+    "visc_melt": 2.020397759294305,
+    "float_temp": 0.42706575602833835,
+    "tension": 10.0,
+    "interface": 1.0
+  },
+  "score": 5.67472526571473,
+  "parts": {
+    "first_blob_s": 0.26190925585300345,
+    "cycling_s": 0.4654257407931942,
+    "cycle_period_s": 0.6074213682898799,
+    "rise_speed": 1.098827342715109,
+    "sink_speed": 0.43498392002937075,
+    "blob_area": 2.4313328410454504,
+    "free_blobs": 0.0,
+    "height": 0.09766929787120228,
+    "merges": 0.2771554991175198
+  },
+  "seconds": 935.9126448631287,
+  "generation": 4,
+  "note": "stage A constants plus surface tension; tension and mobility set by hand from 2-hour runs (score 9.0 vs 13.4)"
+}

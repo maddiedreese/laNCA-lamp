@@ -1,8 +1,9 @@
 """Training data: windows of real wax masks, with a starting temperature for each.
 
-The masks don't show temperature, so a window starts from a smooth temperature field: the
-average temperature of the physics baseline over its later, cycling part. The model has to
-work out the rest from how the wax moves.
+The masks don't show temperature, so a window starts from the temperature the physics
+baseline had at the same point in the recording (snapshots once a minute). That gets the
+broad state right: cold at the start, warming through the eruptions, hot while cycling. The
+model has to work out the details from how the wax moves.
 """
 
 from dataclasses import dataclass
@@ -20,19 +21,26 @@ class Footage:
     masks: np.ndarray  # (T, H, W) uint8 wax probability
     fps: float
     vessel: np.ndarray  # (H, W) bool
-    temp0: np.ndarray  # (H, W) float32 starting temperature
+    temps: np.ndarray  # (minutes, H, W) float32 baseline temperature, one snapshot per minute
 
     @classmethod
     def load(cls, clip: str = CLIP, baseline: str = "default") -> "Footage":
         data = np.load(ROOT / "masks" / f"{clip}_2fps.npz")
-        temps = np.load(ROOT / "runs" / "physics" / baseline / "sim.npz")["temps"].astype(
-            np.float32
+        temps = np.load(ROOT / "runs" / "physics" / baseline / "sim.npz")["temps"]
+        return cls(
+            masks=data["masks"],
+            fps=float(data["fps"]),
+            vessel=data["vessel"],
+            temps=temps.astype(np.float32),
         )
-        temp0 = temps[len(temps) // 2 :].mean(0)
-        return cls(masks=data["masks"], fps=float(data["fps"]), vessel=data["vessel"], temp0=temp0)
 
     def frame_index(self, seconds: float) -> int:
         return round(seconds * self.fps)
+
+    def temp_at(self, frames: np.ndarray) -> np.ndarray:
+        """Baseline temperature (B, H, W) at the given frame indices."""
+        minute = np.minimum((frames / self.fps / 60).astype(int), len(self.temps) - 1)
+        return self.temps[minute]
 
     def windows(
         self, starts: np.ndarray, steps: int, device: str | torch.device = "cpu"
@@ -42,9 +50,14 @@ class Footage:
         Returns the first frame's wax (B, H, W), starting temperature (B, H, W), and the
         following `steps` frames as targets (steps, B, H, W), all float32 in [0, 1].
         """
+        frames = self.frames(starts, steps, device)
+        temp = torch.from_numpy(self.temp_at(starts)).to(device)
+        return frames[0], temp, frames[1:]
+
+    def frames(
+        self, starts: np.ndarray, steps: int, device: str | torch.device = "cpu"
+    ) -> torch.Tensor:
+        """Frames starts..starts+steps as (steps + 1, B, H, W) float32, masked to the vessel."""
         idx = starts[:, None] + np.arange(steps + 1)[None]
         frames = torch.from_numpy(self.masks[idx].astype(np.float32) / 255).to(device)
-        vessel = torch.from_numpy(self.vessel).to(device)
-        frames = frames * vessel
-        temp = torch.from_numpy(self.temp0).to(device)[None].expand(len(starts), -1, -1)
-        return frames[:, 0], temp.contiguous(), frames[:, 1:].transpose(0, 1)
+        return (frames * torch.from_numpy(self.vessel).to(device)).transpose(0, 1)

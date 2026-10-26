@@ -14,9 +14,9 @@ Each step:
 4. physics.advance applies it all, so wax is conserved exactly and stays in [0, 1] whatever
    the network outputs.
 
-Updates are stochastic: each step only a random subset of cells applies its exchange and
-hidden updates (the flow correction applies everywhere, so the flow stays smooth), and hidden
-updates get a little noise. The last layer starts at zero, so an untrained model is exactly
+Hidden updates are stochastic: each step only a random subset of cells applies them, with a
+little noise. Flow and exchange apply everywhere: a random on/off pattern on wax exchange
+injects cell-sized speckle, which over long runs shreds blobs into foam. The last layer starts at zero, so an untrained model is exactly
 the physics baseline.
 """
 
@@ -48,7 +48,7 @@ class LampNCA(nn.Module):
     """Physics-structured NCA. The physical constants live in self.physics.
 
     hidden: number of hidden channels. width, width2: sizes of the per-cell network.
-    fire_rate: share of cells that apply their exchange and hidden updates each step.
+    fire_rate: share of cells that apply their hidden updates each step.
     noise: standard deviation of the noise added to hidden updates.
     psi_scale, exchange_scale: output ranges (cells^2/s, and exchange rate per second).
     speed_scale: typical flow speed in cells/s, used to normalize the velocity inputs.
@@ -155,8 +155,8 @@ class LampNCA(nn.Module):
         pc = F.pad(psi_cell, (1, 1, 1, 1))
         psi_net = 0.25 * (pc[:, :-1, :-1] + pc[:, :-1, 1:] + pc[:, 1:, :-1] + pc[:, 1:, 1:])
 
-        ex = self.exchange_scale * torch.tanh(out[:, 1]) * fire[:, 0]
-        ey = self.exchange_scale * torch.tanh(out[:, 2]) * fire[:, 0]
+        ex = self.exchange_scale * torch.tanh(out[:, 1])
+        ey = self.exchange_scale * torch.tanh(out[:, 2])
         exp, eyp = F.pad(ex, (1, 1, 0, 0)), F.pad(ey, (0, 0, 1, 1))
         sx = 0.5 * (exp[:, :, :-1] + exp[:, :, 1:]) * dt
         sy = 0.5 * (eyp[:, :-1, :] + eyp[:, 1:, :]) * dt

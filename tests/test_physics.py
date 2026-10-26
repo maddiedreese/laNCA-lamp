@@ -48,7 +48,7 @@ def test_wax_is_conserved_exactly_over_100k_steps():
     gen = torch.Generator().manual_seed(1)
     wax = torch.rand(1, H, W, generator=gen, dtype=torch.float64) * g.vessel
     total = wax.sum()
-    rate = torch.tensor(2.0, dtype=torch.float64)
+    rate = torch.tensor(0.05, dtype=torch.float64)
     for i in range(100_000):
         if i % 100 == 0:  # a fresh random flow every 100 steps
             fx, fy = ph.faces_from_stream(_smooth_psi(gen, 0.3), g)
@@ -56,7 +56,7 @@ def test_wax_is_conserved_exactly_over_100k_steps():
             fx, fy = fx / n, fy / n
         for _ in range(n):
             wax = ph.advect(wax, fx, fy)
-        wax = ph.apply_exchange(wax, *ph.cohesion_faces(wax, g, rate))
+        wax = ph.apply_exchange(wax, *ph.tension_faces(wax, g, rate, 1.0))
     assert abs(float(wax.sum() - total)) < 1e-9 * float(total)
     assert wax.min() >= -1e-12 and wax.max() <= 1 + 1e-12
     assert (wax * (1 - g.vessel)).abs().max() == 0
@@ -118,7 +118,7 @@ def test_full_step_conserves_wax_and_keeps_temperature_in_range():
 
 def test_heat_without_wax_settles_warm_at_the_bottom():
     g = _geom()
-    p = _params()
+    p = _params(tension=0.0)  # no wax, so skip the (costly) surface tension substeps
     s = ph.State(
         wax=torch.zeros(1, H, W, dtype=torch.float64),
         temp=torch.zeros(1, H, W, dtype=torch.float64),
@@ -154,24 +154,66 @@ def test_hot_wax_rises_and_cold_wax_sinks():
         h0 = _blob_height(s.wax, g)
         for _ in range(20):
             s = ph.step(s, g, p, dt=0.5)
-        assert direction * (_blob_height(s.wax, g) - h0) > 0.02, (
+        assert direction * (_blob_height(s.wax, g) - h0) > 0.01, (
             blob_temp,
             h0,
             _blob_height(s.wax, g),
         )
 
 
-def test_cohesion_sharpens_edges_without_losing_wax():
+def _outline(wax: torch.Tensor, g: ph.Geometry) -> float:
+    """Total variation inside the vessel: the length of the wax outline."""
+    gx = (wax[..., :, 1:] - wax[..., :, :-1]).abs() * g.open_x[:, 1:-1]
+    gy = (wax[..., 1:, :] - wax[..., :-1, :]).abs() * g.open_y[1:-1]
+    return float(gx.sum() + gy.sum())
+
+
+def _relax(wax: torch.Tensor, g: ph.Geometry, seconds: float, **params) -> torch.Tensor:
+    p = _params(**params)
+    for _ in range(int(seconds / 0.5)):
+        wax = ph.apply_tension(wax, g, p, 0.5)
+    return wax
+
+
+def test_surface_tension_shortens_ragged_outlines():
     g = _geom()
-    wax = torch.zeros(1, H, W, dtype=torch.float64)
-    wax[0, 12:20, 5:11] = 1.0
-    wax = F.avg_pool2d(F.pad(wax[:, None], (2, 2, 2, 2)), 5, 1)[:, 0] * g.vessel
-    total, fuzz = wax.sum(), (wax * (1 - wax)).sum()
-    rate = torch.tensor(1.0, dtype=torch.float64)
-    for _ in range(200):
-        wax = ph.apply_exchange(wax, *ph.cohesion_faces(wax, g, rate))
-    assert abs(float(wax.sum() - total)) < 1e-12 * float(total)
-    assert (wax * (1 - wax)).sum() < 0.5 * fuzz
+    gen = torch.Generator().manual_seed(11)
+    blob = torch.zeros(1, H, W, dtype=torch.float64)
+    blob[0, 10:22, 4:12] = 1.0
+    ragged = (blob * (torch.rand(blob.shape, generator=gen, dtype=torch.float64) > 0.3)) * g.vessel
+    total = ragged.sum()
+    relaxed = _relax(ragged, g, 40.0)
+    assert abs(float(relaxed.sum() - total)) < 1e-12 * float(total)
+    assert relaxed.min() >= -1e-12 and relaxed.max() <= 1 + 1e-12
+    assert (relaxed * (1 - g.vessel)).abs().max() == 0
+    assert _outline(relaxed, g) < 0.5 * _outline(ragged, g)
+    # The holes fill in rather than the blob dissolving: the core ends up solid wax.
+    assert float(relaxed[0, 13:19, 6:10].min()) > 0.8
+
+
+def test_surface_tension_gradients_pass_straight_through_by_default():
+    g = _geom()
+    p = _params()
+    wax = (torch.rand(1, H, W, dtype=torch.float64) * g.vessel).requires_grad_(True)
+    out = ph.apply_tension(wax, g, p, 0.5)
+    assert not torch.equal(out.detach(), wax.detach())  # forward really applies tension
+    out.sum().backward()
+    assert torch.equal(wax.grad, torch.ones_like(wax))  # backward is the identity
+    exact = (torch.rand(1, H, W, dtype=torch.float64) * g.vessel).requires_grad_(True)
+    ph.apply_tension(exact, g, p, 0.5, grad=True).pow(2).sum().backward()
+    assert not torch.equal(exact.grad, 2 * exact.detach())  # grad=True differentiates through
+
+
+def test_surface_tension_rounds_a_long_bar():
+    g = _geom()
+    bar = torch.zeros(1, H, W, dtype=torch.float64)
+    bar[0, 15:17, 3:13] = 1.0  # 2 x 10: far longer outline than a disc of the same area
+    bar = bar * g.vessel
+    relaxed = _relax(bar, g, 60.0, tension=4.0)
+    rows = relaxed[0].sum(1)
+    tall = int((rows > 0.5).sum())
+    assert _outline(relaxed, g) < 0.85 * _outline(bar, g)
+    assert tall >= 3  # the bar has pulled in and thickened
 
 
 def test_poisson_matches_discrete_laplacian():

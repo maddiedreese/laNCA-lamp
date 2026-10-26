@@ -1,15 +1,19 @@
-"""Run the physics core alone (no learning) from the real cold start and compare to the footage.
+"""Simulate the lamp for 2 hours from the real cold start and compare to the footage.
 
-    uv run python -m lanca.baseline                          # defaults, full 2 hours
+    uv run python -m lanca.baseline                          # physics alone, default constants
     uv run python -m lanca.baseline --set mobility=0.08 --name faster
+    uv run python -m lanca.baseline --constants runs/fit/constants.json --name fitted
+    uv run python -m lanca.baseline --checkpoint runs/train/stage_c/best.pt --name trained
 
-Outputs go to runs/physics/<name>/: simulated masks, temperature snapshots (starting points
-for training), behavior stats, and a side-by-side video with the real lamp.
+With --checkpoint, the trained model (network plus its constants) runs instead of the
+physics alone. Outputs go to runs/physics/<name>/: simulated masks, temperature snapshots,
+behavior stats, and a side-by-side video with the real lamp.
 """
 
 import argparse
 import json
 import time
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -18,6 +22,7 @@ import torch
 from lanca import measure
 from lanca import physics as ph
 from lanca.extract import ROOT
+from lanca.model import LampNCA
 
 CLIP = "lamp-2026-10-25"
 COMPARE = [
@@ -35,9 +40,19 @@ COMPARE = [
 
 
 def run(
-    params: ph.Params, minutes: float, dt: float, device: str, seed: int = 0, noise: float = 2e-3
+    params: ph.Params,
+    minutes: float,
+    dt: float,
+    device: str,
+    seed: int = 0,
+    noise: float = 2e-3,
+    model: LampNCA | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Simulate from the first real mask. Returns (wax at 1/dt fps as uint8, temp snapshots, vessel)."""
+    """Simulate from the first real mask. Returns (wax at 1/dt fps as uint8, temp snapshots, vessel).
+
+    With a model, it steps the trained model (and ignores params, using the model's own
+    constants); otherwise the physics alone.
+    """
     data = np.load(ROOT / "masks" / f"{CLIP}_2fps.npz")
     vessel = torch.from_numpy(data["vessel"])
     geom = ph.Geometry(vessel).to(device, torch.float32)
@@ -45,8 +60,16 @@ def run(
     wax0 = (
         torch.from_numpy(data["masks"][0].astype(np.float32) / 255).to(device)[None] * geom.vessel
     )
-    state = ph.State(wax=wax0, temp=torch.zeros_like(wax0))
+    if model is not None:
+        state = model.init_state(wax0)
+    else:
+        state = ph.State(wax=wax0, temp=torch.zeros_like(wax0))
     gen = torch.Generator(device=device).manual_seed(seed)
+
+    def advance(s: ph.State) -> ph.State:
+        if model is None:
+            return ph.step(s, geom, p, dt)
+        return model.step(s, geom, dt, *model.draw_randomness(s, gen))
 
     n = int(minutes * 60 / dt)
     snap_every = int(60 / dt)
@@ -61,7 +84,7 @@ def run(
             state.temp = (state.temp + jitter * geom.vessel).clamp(0, 1)
             before = state
             try:
-                state = ph.step(state, geom, p, dt)
+                state = advance(state)
                 finite = all(bool(torch.isfinite(t).all()) for t in (state.wax, state.temp))
             except ValueError:  # substeps() raises on a NaN flow
                 finite = False
@@ -109,7 +132,7 @@ def _fmt(x: float | None) -> str:
 
 
 def compare(real: dict, sim: dict) -> str:
-    lines = [f"{'':22s} {'real':>10s} {'baseline':>10s}"]
+    lines = [f"{'':22s} {'real':>10s} {'simulated':>10s}"]
     for name, get in COMPARE:
         lines.append(f"{name:22s} {_fmt(get(real))} {_fmt(get(sim))}")
     return "\n".join(lines)
@@ -129,20 +152,37 @@ def main() -> None:
     ap.add_argument(
         "--set", nargs="*", default=[], metavar="NAME=VALUE", help="override physical constants"
     )
+    ap.add_argument("--constants", default=None, help="constants JSON from fit_constants")
+    ap.add_argument("--checkpoint", default=None, help="trained model checkpoint to run instead")
     args = ap.parse_args()
     if args.threads:
         torch.set_num_threads(args.threads)
 
-    overrides = {k: float(v) for k, v in (kv.split("=") for kv in args.set)}
-    unknown = set(overrides) - set(ph.PARAM_BOUNDS)
+    overrides = {}
+    if args.constants:
+        # Files may come from older versions of the physics; skip constants it no longer has.
+        saved = json.loads(Path(args.constants).read_text())["constants"]
+        retired = sorted(set(saved) - set(ph.PARAM_BOUNDS))
+        if retired:
+            print(f"ignoring constants no longer in the physics: {', '.join(retired)}")
+        overrides.update({k: v for k, v in saved.items() if k in ph.PARAM_BOUNDS})
+    command_line = {k: float(v) for k, v in (kv.split("=") for kv in args.set)}
+    unknown = set(command_line) - set(ph.PARAM_BOUNDS)
     if unknown:
         ap.error(f"unknown constant(s): {', '.join(sorted(unknown))}")
+    overrides.update(command_line)
     params = ph.Params(**overrides)
+    model = None
+    if args.checkpoint:
+        model = LampNCA().to(args.device)
+        model.load_state_dict(torch.load(args.checkpoint, map_location=args.device))
+        model.eval()
+        params = model.physics
 
     out = ROOT / "runs" / "physics" / args.name
     out.mkdir(parents=True, exist_ok=True)
     start = time.time()
-    frames, temps, vessel = run(params, args.minutes, args.dt, args.device)
+    frames, temps, vessel = run(params, args.minutes, args.dt, args.device, model=model)
     print(f"simulated {args.minutes:.0f} min in {time.time() - start:.0f}s")
 
     fps = 1 / args.dt
