@@ -50,6 +50,49 @@ uv run python -m lanca.prepare lamp-2026-10-25 masks qa     # re-run later stage
 `masks/<clip>_2fps.npz` is committed; the 10 fps file exceeds GitHub's size limit and is
 regenerated locally.
 
+## Phase 3: physics core
+
+`src/lanca/physics.py` holds the parts of the lamp that are hard-coded rather than learned:
+
+- **Flow** from a stream function on cell corners: divergence-free by construction, with zero
+  flow through the glass. The built-in flow is slow viscous (Stokes) flow driven by buoyancy,
+  with wax ~100x more viscous than the liquid and stiffer when cold, solved by preconditioned
+  conjugate gradients. The learned model adds its own stream function on top.
+- **Transport** of wax and heat by conservative upwind fluxes: wax stays in [0, 1] and its
+  total is exact to float rounding. Interface compression after each substep cancels the
+  smearing that upwind transport causes, in proportion to the flow.
+- **Cohesion**: a bounded, conservative wax/liquid exchange that pulls wax toward denser wax
+  nearby, standing in for surface tension.
+- **Heat**: conduction (different for wax and liquid), a bulb under the base, and cooling
+  through the walls and cap. Hot wax rises, cold wax sinks.
+
+The 13 physical constants live in `physics.Params`, bounded and ready to fit in Phase 5.
+
+```bash
+uv run python -m lanca.baseline --name default            # physics alone, from the real cold start
+uv run python -m lanca.baseline --set cohesion=8 mobility=6 --name test --threads 2
+```
+
+The baseline writes simulated masks, temperature snapshots, stats and a side-by-side video to
+`runs/physics/<name>/`. A 2-hour run takes about 13 minutes on the Mac mini's CPU.
+
+**Status.** The guarantees hold (`tests/test_physics.py`). With the default constants, the
+physics alone warms up, sends wax up and down for the whole run with a pool at the bottom,
+and keeps wax as sharp-edged blobs. Against the footage (cycling phase):
+
+| | real | baseline |
+|---|---|---|
+| first blob | 812 s | 551 s |
+| regular cycling from | 2831 s | 1062 s |
+| cycle period | 66 s | 132 s |
+| rise speed (lamp heights/s) | 0.023 | 0.007 |
+| typical blob size (fraction of glass) | 0.083 | 0.007 |
+| merges per minute | 8.5 | 6.4 |
+
+What is still wrong: wax breaks into many small, angular pieces instead of two or three big
+round blobs, and it moves at about a third of the real speed. Phase 4's learned flow and
+exchange, and Phase 5's constant fitting, are meant to close those gaps.
+
 ## Footage
 
 All training data comes from one self-recorded clip, listed in `footage/manifest.json` and
