@@ -1,0 +1,34 @@
+{
+  "schema": {
+    "id": "short unique slug, used for file names",
+    "source": "self-recorded, or the page the clip was found on",
+    "download_url": "direct file URL used by fetch.py; null for self-recorded clips",
+    "filename": "local file name under footage/clips/",
+    "sha256": "hash of the file",
+    "author": "creator",
+    "license": "license of the raw footage",
+    "attribution": "credit line as it should appear in CREDITS.md",
+    "recorded": "YYYY-MM-DD",
+    "speed_factor": "1.0 for real time, e.g. 8.0 for an 8x timelapse",
+    "duration_s": "clip length in seconds",
+    "video": "container and stream details",
+    "notes": "lamp type, wax color, phases covered, quality issues"
+  },
+  "clips": [
+    {
+      "id": "lamp-2026-10-25",
+      "source": "self-recorded",
+      "download_url": null,
+      "filename": "lamp-2026-10-25.mov",
+      "sha256": "ad6e27f5a667ebe6f39b48630cfc0fe1600628343258f35d70200e16423f2eb0",
+      "author": "Maddie Dreese",
+      "license": "All rights reserved (owned by the project author; not redistributed)",
+      "attribution": "Recorded by Maddie Dreese for laNCA-lamp",
+      "recorded": "2026-10-25",
+      "speed_factor": 1.0,
+      "duration_s": 7201.08,
+      "video": "QuickTime, H.264 High, 1620x1080, ~29.92 fps average (variable), no audio, 10.8 GB",
+      "notes": "Rocket-style lamp: orange/red wax in violet liquid, silver base and nose cone. Recording starts from cold, so it covers the full warm-up and about 85 minutes of steady cycling. No cool-down. Camera drifts slowly (about 40 px left and 100 px up over the recording, plus slight zoom/tilt), so frames are stabilized against the lamp body before masking."
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "_doc": "Per-clip settings for Phase 2. Pixel boxes are [x0, y0, x1, y1] in full-resolution coordinates of the clip's first frame.",
+  "lamp-2026-10-25": {
+    "decode_roi": [600, 0, 1100, 1080],
+    "anchors": {
+      "nose": [800, 120, 880, 212],
+      "base": [750, 880, 990, 985]
+    },
+    "glass_box": [761, 213, 938, 567],
+    "grid": [128, 64]
+  }
+}

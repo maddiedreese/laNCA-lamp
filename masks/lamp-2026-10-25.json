@@ -1,0 +1,47 @@
+{
+  "clip": "lamp-2026-10-25",
+  "fps": 10.0,
+  "frames": 72011,
+  "grid": [
+    128,
+    64
+  ],
+  "encoding": "uint8 wax probability, 0-255; cells outside the vessel are 0",
+  "glass_box": [
+    761,
+    213,
+    938,
+    567
+  ],
+  "anchors": {
+    "nose": [
+      800,
+      120,
+      880,
+      212
+    ],
+    "base": [
+      750,
+      880,
+      990,
+      985
+    ]
+  },
+  "min_anchor_score": 0.9566745162010193,
+  "vessel_cells": 6091,
+  "wax_model": {
+    "otsu_b": 17.3359375,
+    "threshold_b": 17.593223571777344,
+    "liquid_b_ref": -21.0,
+    "liquid_pct": 10.0,
+    "glow_cap": 25.0,
+    "class_means_b": [
+      -14.099321365356445,
+      49.285770416259766
+    ],
+    "glare_px": 1052,
+    "softness": 7.9231367111206055,
+    "hot_l": 215.0,
+    "hot_softness": 8.0
+  }
+}

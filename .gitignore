@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Raw footage is never committed; footage/fetch.py re-downloads it from manifest.json
+footage/clips/
+footage/frames/
+
+# Full-rate masks exceed GitHub's file size limit; the 2 fps copies are committed
+masks/*.npz
+!masks/*_2fps.npz
+
+# Training outputs
+runs/
+
+# macOS
+.DS_Store

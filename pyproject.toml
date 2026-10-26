@@ -1,0 +1,34 @@
+[project]
+name = "lanca-lamp"
+version = "0.1.0"
+description = "laNCA-lamp: a physics-structured neural cellular automaton lava lamp, trained on masks from openly licensed footage."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "torch>=2.5",
+    "numpy>=2.0",
+    "opencv-python-headless>=4.10",
+    "scipy>=1.14",
+    "matplotlib>=3.9",
+    "tqdm>=4.66",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lanca"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
