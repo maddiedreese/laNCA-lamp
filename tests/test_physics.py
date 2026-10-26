@@ -204,6 +204,22 @@ def test_surface_tension_gradients_pass_straight_through_by_default():
     assert not torch.equal(exact.grad, 2 * exact.detach())  # grad=True differentiates through
 
 
+def test_surface_tension_partial_gradients_see_the_last_substeps():
+    g = _geom()
+    p = _params()
+    base = torch.rand(1, H, W, dtype=torch.float64) * g.vessel
+    outs, grads = [], []
+    for k in (0, 8):
+        wax = base.clone().requires_grad_(True)
+        out = ph.apply_tension(wax, g, p, 0.5, grad_substeps=k)
+        out.pow(2).sum().backward()
+        outs.append(out.detach())
+        grads.append(wax.grad)
+    assert torch.allclose(outs[0], outs[1], atol=1e-12)  # same forward result
+    assert torch.allclose(grads[0], 2 * outs[0])  # k = 0: straight through
+    assert not torch.allclose(grads[1], grads[0])  # k = 8: tension shapes the gradient
+
+
 def test_surface_tension_rounds_a_long_bar():
     g = _geom()
     bar = torch.zeros(1, H, W, dtype=torch.float64)

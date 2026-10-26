@@ -52,6 +52,8 @@ class LampNCA(nn.Module):
     noise: standard deviation of the noise added to hidden updates.
     psi_scale, exchange_scale: output ranges (cells^2/s, and exchange rate per second).
     speed_scale: typical flow speed in cells/s, used to normalize the velocity inputs.
+    tension_grad_substeps: final surface-tension substeps to differentiate through, so the
+    network learns how tension will reshape its output (see physics.apply_tension).
     """
 
     def __init__(
@@ -64,6 +66,7 @@ class LampNCA(nn.Module):
         psi_scale: float = 10.0,
         exchange_scale: float = 2.0,
         speed_scale: float = 3.0,
+        tension_grad_substeps: int = 8,
         physics: ph.Params | None = None,
     ):
         super().__init__()
@@ -73,6 +76,7 @@ class LampNCA(nn.Module):
         self.psi_scale = psi_scale
         self.exchange_scale = exchange_scale
         self.speed_scale = speed_scale
+        self.tension_grad_substeps = tension_grad_substeps
         self.physics = physics if physics is not None else ph.Params()
 
         self.n_in = 2 + hidden + 2 + 2  # wax, temp, hidden, vx, vy, vessel, height
@@ -161,7 +165,9 @@ class LampNCA(nn.Module):
         sx = 0.5 * (exp[:, :, :-1] + exp[:, :, 1:]) * dt
         sy = 0.5 * (eyp[:, :-1, :] + eyp[:, 1:, :]) * dt
 
-        new = ph.advance(state, geom, p, dt, psi_phys + psi_net, flow, (sx, sy))
+        new = ph.advance(
+            state, geom, p, dt, psi_phys + psi_net, flow, (sx, sy), self.tension_grad_substeps
+        )
         dh = (torch.tanh(out[:, 3:]) + noise) * fire
         new.hidden = (new.hidden + dh).clamp(-1, 1) * geom.vessel
         return new

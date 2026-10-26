@@ -426,7 +426,12 @@ def tension_faces(
 
 
 def apply_tension(
-    wax: Tensor, geom: Geometry, p: dict[str, Tensor], dt: float, grad: bool = False
+    wax: Tensor,
+    geom: Geometry,
+    p: dict[str, Tensor],
+    dt: float,
+    grad: bool = False,
+    grad_substeps: int = 0,
 ) -> Tensor:
     """Apply surface tension for dt seconds, in as many substeps as stability needs.
 
@@ -436,25 +441,31 @@ def apply_tension(
     w(1 - w) form), so each substep keeps rate * (64 width^2 + 2) under 1, or it oscillates and
     makes outlines longer instead of shorter. That is hundreds of substeps per step.
 
-    Differentiating through all of them is impractical (it ran the GPU out of memory), so by
-    default gradients pass straight through: the backward pass treats tension as leaving wax
-    unchanged. grad=True differentiates through it exactly.
+    Differentiating through all of them is impractical (it ran the GPU out of memory), so:
+    - grad=True differentiates through every substep exactly;
+    - grad_substeps=k > 0 runs the earlier substeps without gradients and the last k with
+      them, so the backward pass sees how tension reshapes wax (speckle is smoothed away, so
+      producing it gains nothing) at memory cost proportional to k. The earlier substeps pass
+      gradients straight through;
+    - otherwise all substeps pass gradients straight through, as if tension did nothing.
     """
     width = p["interface"].detach()
     stiffness = float((p["tension"].detach() * dt * (64 * width**2 + 2)).max())
     n = max(1, math.ceil(stiffness))
 
-    def relax(w: Tensor, tension: Tensor, width: Tensor) -> Tensor:
+    def relax(w: Tensor, tension: Tensor, width: Tensor, steps: int) -> Tensor:
         rate = tension * dt / n
-        for _ in range(n):
+        for _ in range(steps):
             w = apply_exchange(w, *tension_faces(w, geom, rate, width))
         return w
 
     if grad or not torch.is_grad_enabled():
-        return relax(wax, p["tension"], p["interface"])
+        return relax(wax, p["tension"], p["interface"], n)
+    k = min(grad_substeps, n)
     with torch.no_grad():
-        relaxed = relax(wax, p["tension"].detach(), width)
-    return wax + (relaxed - wax).detach()
+        early = relax(wax, p["tension"].detach(), width, n - k)
+    early = wax + (early - wax).detach()
+    return relax(early, p["tension"], p["interface"], k)
 
 
 def compression_faces(
@@ -578,11 +589,14 @@ def advance(
     psi: Tensor,
     flow: Tensor | None = None,
     exchange_extra: tuple[Tensor, Tensor] | None = None,
+    tension_grad_substeps: int = 0,
 ) -> State:
     """Advance by dt seconds with a given total stream function psi (per second).
 
     Everything after the flow solve: transport, compression, surface tension, any extra exchange,
     and heat. flow is the solver solution to carry forward for warm starts.
+    tension_grad_substeps: how many final surface-tension substeps to differentiate through
+    (see apply_tension).
     """
     fx, fy = faces_from_stream(psi * dt, geom)
     n = substeps(outflow(fx, fy))
@@ -594,7 +608,7 @@ def advance(
         if hidden is not None:
             hidden = advect(hidden, fx, fy)
 
-    wax = apply_tension(wax, geom, p, dt)
+    wax = apply_tension(wax, geom, p, dt, grad_substeps=tension_grad_substeps)
     if exchange_extra is not None:
         wax = apply_exchange(wax, *exchange_faces(wax, geom, *exchange_extra))
 

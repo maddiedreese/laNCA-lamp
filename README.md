@@ -65,7 +65,8 @@ regenerated locally.
 - **Surface tension**, Cahn-Hilliard style: wax flows down a chemical potential that is high
   on bumps and thin bits, which shortens outlines, rounds blobs and drives pinch-off. It is a
   conservative, bounded exchange, explicit and stiff (hundreds of cheap substeps per step);
-  gradients pass straight through it unless asked for.
+  gradients flow through only its last few substeps (8 in the model) and pass straight
+  through the rest, which keeps memory bounded.
 - **Heat**: conduction (different for wax and liquid), a bulb under the base, and cooling
   through the walls and cap. Hot wax rises, cold wax sinks.
 
@@ -171,16 +172,16 @@ uv run python -m lanca.baseline --checkpoint runs/train/stage_b/best.pt --name t
 Results, 2-hour free runs from the cold start (score: stage A's weighted log-error, lower is
 better):
 
-| | real | fitted physics, cohesion | tension physics | trained on tension physics |
-|---|---|---|---|---|
-| score | - | 13.4 | **9.0** | 10.1 |
-| first blob | 812 s | 487 s | 1126 s | 1444 s |
-| regular cycling from | 2831 s | 1353 s | 2028 s | 1794 s |
-| cycle period | 66 s | 122 s | **78 s** | 95 s |
-| rise speed (lamp heights/s) | 0.023 | 0.0097 | 0.0071 | 0.0084 |
-| typical blob size | 0.083 | 0.009 | 0.018 | 0.014 |
-| merges per minute | 8.5 | 6.3 | 5.0 | 6.6 |
-| edge per unit wax | 0.13 | 0.46 | 0.32 | 0.33 |
+| | real | fitted physics, cohesion | tension physics | trained, straight-through tension | trained, tension gradients |
+|---|---|---|---|---|---|
+| score | - | 13.4 | **9.0** | 10.1 | 9.9 |
+| first blob | 812 s | 487 s | 1126 s | 1444 s | 1421 s |
+| regular cycling from | 2831 s | 1353 s | 2028 s | 1794 s | 1958 s |
+| cycle period | 66 s | 122 s | **78 s** | 95 s | 159 s |
+| rise speed (lamp heights/s) | 0.023 | 0.0097 | 0.0071 | 0.0084 | 0.0080 |
+| typical blob size | 0.083 | 0.009 | 0.018 | 0.014 | 0.018 |
+| merges per minute | 8.5 | 6.3 | 5.0 | 6.6 | 5.2 |
+| edge per unit wax | 0.13 | 0.46 | 0.32 | 0.33 | 0.32 |
 
 With surface tension the blobs are smooth and solid, the cold pool holds through warm-up, and
 the cycle period is within 20% of the real lamp. Still off: blobs are about 5x too small and
@@ -188,11 +189,16 @@ tend to hug the walls, and wax rises about 3x too slowly.
 
 The network trained on top of the tension physics barely learned: its held-out behavior error
 stayed flat (about 0.39) for all 400 iterations, and in 2-hour runs it is slightly worse than
-the physics alone (faster, more realistic merging, but smaller blobs and a slower cycle). The
-likely reason is the straight-through gradient: tension reshapes wax every step, but the
-network's gradients can't see that, so its shape corrections get smoothed away without it
-learning why. An earlier network trained on the cohesion physics improved short-window
-behavior error by 45% but shredded wax in long runs.
+the physics alone. The first suspect was the straight-through gradient through surface
+tension, so the model now differentiates through the last 8 tension substeps. Retrained the
+same way, the network still didn't learn (held-out behavior 0.390 at the start, 0.389 at the
+end; its output layer moved about as far as before). Its 2-hour run keeps the physics' blob
+size and edges and scores 9.9, between the two, but cycles about half as often. So the
+gradient path through tension was not what held training back. The remaining gaps (blobs 5x
+too small, wax hugging the walls, rising 3x too slowly) are set by the flow, and stage B
+doesn't differentiate through the flow solve, while the network's stream-function correction
+gets only 32-step (16 s) windows to learn from. An earlier network trained on the cohesion
+physics improved short-window behavior error by 45% but shredded wax in long runs.
 
 ## Footage
 
