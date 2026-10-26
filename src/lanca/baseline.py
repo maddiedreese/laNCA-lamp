@@ -59,7 +59,18 @@ def run(
             jitter = torch.randn((1, 1, *geom.shape), generator=gen, device=device)
             jitter = torch.nn.functional.avg_pool2d(jitter, 9, 1, 4)[:, 0] * (noise * 9)
             state.temp = (state.temp + jitter * geom.vessel).clamp(0, 1)
-            state = ph.step(state, geom, p, dt)
+            before = state
+            try:
+                state = ph.step(state, geom, p, dt)
+                finite = all(bool(torch.isfinite(t).all()) for t in (state.wax, state.temp))
+            except ValueError:  # substeps() raises on a NaN flow
+                finite = False
+            if not finite:
+                path = ROOT / "runs" / "physics" / f"crash_step{i}.pt"
+                torch.save(
+                    {"step": i, **{k: getattr(before, k) for k in ("wax", "temp", "flow")}}, path
+                )
+                raise RuntimeError(f"non-finite state at step {i}; pre-step state saved to {path}")
             frames[i] = (state.wax[0] * 255).round().clamp(0, 255).byte().cpu().numpy()
             if i % snap_every == 0:
                 temps.append(state.temp[0].cpu().numpy().astype(np.float16))

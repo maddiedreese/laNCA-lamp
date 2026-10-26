@@ -84,16 +84,52 @@ class Geometry:
         self._eig = ln[:, None] + lm[None, :]
         self._norm = 4.0 / ((n + 1) * (m + 1))
 
+        # Capacitance matrix, for exact uniform-viscosity solves on the vessel's own shape (see
+        # vessel_biharmonic). Built from the response to a unit impulse at each pinned corner.
+        self._pinned = torch.nonzero(self.free_inner.flatten() == 0).squeeze(1)
+        k = len(self._pinned)
+        if k:
+            cap = torch.empty(k, k, dtype=v.dtype, device=v.device)
+            for i in range(0, k, 512):
+                rows = self._pinned[i : i + 512]
+                impulses = torch.zeros(len(rows), n * m, dtype=v.dtype, device=v.device)
+                impulses[torch.arange(len(rows)), rows] = 1.0
+                response = self.poisson(self.poisson(impulses.view(-1, n, m))).flatten(1)
+                cap[i : i + len(rows)] = response[:, self._pinned]
+            self._cap_inv = torch.linalg.inv(cap)
+        else:
+            self._cap_inv = torch.zeros(0, 0, dtype=v.dtype, device=v.device)
+
     def to(self, device: torch.device | str, dtype: torch.dtype = torch.float32) -> "Geometry":
         for k, val in vars(self).items():
             if isinstance(val, Tensor):
-                setattr(self, k, val.to(device=device, dtype=dtype))
+                if val.is_floating_point():
+                    setattr(self, k, val.to(device=device, dtype=dtype))
+                else:
+                    setattr(self, k, val.to(device=device))
         return self
 
     def poisson(self, f: Tensor) -> Tensor:
         """Solve laplacian(x) = f on the (H-1, W-1) interior corners, x = 0 on the border."""
         fh = self._sn @ f @ self._sm
         return self._norm * (self._sn @ (fh / self._eig) @ self._sm)
+
+    def vessel_biharmonic(self, f: Tensor) -> Tensor:
+        """Exactly solve the uniform-viscosity flow equation on the vessel's own shape.
+
+        The sine transform solves it on the bounding box. Pinning stream values to zero at the
+        corners outside the vessel adds a force at those corners; the capacitance matrix
+        (box response at pinned corners to forces at pinned corners) gives exactly the forces
+        that cancel the box solution there. f is (B, H-1, W-1); the result is zero off-vessel.
+        """
+        y = self.poisson(self.poisson(f))
+        if len(self._pinned):
+            b = f.shape[0]
+            force = y.flatten(1)[:, self._pinned] @ self._cap_inv.T
+            spread = torch.zeros(b, y[0].numel(), dtype=f.dtype, device=f.device)
+            spread[:, self._pinned] = force
+            y = y - self.poisson(self.poisson(spread.view_as(y)))
+        return y * self.free_inner
 
 
 def _sine_matrix(n: int, device) -> Tensor:
@@ -220,14 +256,22 @@ def solve_stokes(
     mu: Tensor,
     geom: Geometry,
     x0: Tensor | None = None,
-    tol: float = 1e-4,
+    tol: float = 1e-2,
     max_iter: int = 300,
 ) -> tuple[Tensor, int]:
-    """Solve stokes_operator(x) = rhs by conjugate gradients.
+    """Solve stokes_operator(x) = rhs by conjugate gradients, to a relative residual of tol.
 
-    Preconditioned with the exact uniform-viscosity inverse (two sine-transform Poisson
-    solves), so a uniform mu converges in one iteration and contrast costs extra iterations.
-    Returns the solution and the number of iterations used.
+    The default of 1% is plenty for a flow that the learned model corrects anyway, and
+    roughly halves the cost of 0.01%.
+
+    Preconditioned with the exact uniform-viscosity inverse on the vessel's shape
+    (Geometry.vessel_biharmonic), so a uniform mu converges in one iteration and only the
+    viscosity contrast costs extra iterations. Returns the solution and iterations used.
+
+    Each batch item stops updating as soon as it converges. Without that, items that converge
+    early keep iterating on rounding noise until the slowest one finishes, and the ratio of two
+    near-zero numbers eventually blows up to inf and then NaN. An item whose CG quantities
+    stop being positive and finite is frozen at its last good iterate for the same reason.
     """
     m = geom.free_inner
     b = rhs * m
@@ -236,24 +280,40 @@ def solve_stokes(
         return (u * v).sum((1, 2), keepdim=True)
 
     def precondition(r):
-        return geom.poisson(geom.poisson(r * m)) * m
+        return geom.vessel_biharmonic(r * m)
 
     x = torch.zeros_like(b) if x0 is None else x0 * m
     r = b - stokes_operator(x, mu, geom)
-    b_norm = dot(b, b).sqrt().clamp(min=1e-30)
+    b_norm = dot(b, b).sqrt()
     z = precondition(r)
     d, rz = z, dot(r, z)
+    active = torch.ones_like(b_norm, dtype=torch.bool)
     for i in range(max_iter):
-        if bool((dot(r, r).sqrt() <= tol * b_norm).all()):
+        active = active & (dot(r, r).sqrt() > tol * b_norm)
+        if not bool(active.any()):
             return x, i
         ad = stokes_operator(d, mu, geom)
-        alpha = rz / dot(d, ad).clamp(min=1e-30)
-        x = x + alpha * d
-        r = r - alpha * ad
-        z = precondition(r)
-        rz_new = dot(r, z)
-        d = z + (rz_new / rz.clamp(min=1e-30)) * d
-        rz = rz_new
+        dad = dot(d, ad)
+        ok = active & (rz > 0) & (dad > 0) & torch.isfinite(rz) & torch.isfinite(dad)
+        alpha = torch.where(
+            ok, rz / torch.where(ok, dad, torch.ones_like(dad)), torch.zeros_like(dad)
+        )
+        x_new = x + alpha * d
+        r_new = r - alpha * ad
+        z = precondition(r_new)
+        rz_new = dot(r_new, z)
+        # Reject any update that overflowed, so a finite warm start always yields a finite
+        # flow, whatever rounding does to a chaotic simulation.
+        finite = torch.isfinite(x_new).all(dim=(1, 2), keepdim=True) & torch.isfinite(rz_new)
+        ok = ok & finite
+        beta = torch.where(
+            ok, rz_new / torch.where(ok, rz, torch.ones_like(rz)), torch.zeros_like(rz)
+        )
+        x = torch.where(ok, x_new, x)
+        r = torch.where(ok, r_new, r)
+        d = torch.where(ok, z + beta * d, d)
+        rz = torch.where(ok, rz_new, rz)
+        active = ok
     return x, max_iter
 
 
@@ -272,14 +332,13 @@ def stokes_stream(
 ) -> tuple[Tensor, Tensor]:
     """Stream function (B, H+1, W+1) of slow viscous flow driven by an upward force (B, H, W).
 
-    With mu None, the viscosity is uniform and the solution is direct (two Poisson solves on
-    the vessel's bounding box, zeroed outside the vessel afterwards). With mu, the
-    variable-viscosity equation is solved iteratively inside the vessel. Also returns the raw
-    solution, to warm-start the next call.
+    With mu None, the viscosity is uniform and the solution is direct and exact on the
+    vessel's shape. With mu, the variable-viscosity equation is solved iteratively. Also
+    returns the raw solution, to warm-start the next call.
     """
     f = buoyancy_rhs(buoyancy, geom)
     if mu is None:
-        x = geom.poisson(geom.poisson(f))
+        x = geom.vessel_biharmonic(f)
     else:
         x, _ = solve_stokes(f, mu, geom, x0)
     # Sign convention checked by test_hot_wax_rises_and_cold_wax_sinks: with rows growing
@@ -364,7 +423,9 @@ def compression_faces(
     bp = F.pad(blur, (1, 1, 1, 1), mode="replicate")
     gx = 0.5 * (bp[:, 1:-1, 2:] - bp[:, 1:-1, :-2])
     gy = 0.5 * (bp[:, 2:, 1:-1] - bp[:, :-2, 1:-1])
-    mag = torch.sqrt(gx**2 + gy**2) + 1e-6
+    # The epsilon goes inside the root: sqrt has an infinite derivative at 0, which would turn
+    # gradients into NaN wherever the wax is flat.
+    mag = torch.sqrt(gx**2 + gy**2 + 1e-12)
     nx, ny = gx / mag, gy / mag
     nxp = F.pad(nx, (1, 1, 0, 0))
     nyp = F.pad(ny, (0, 0, 1, 1))
@@ -424,6 +485,22 @@ def heat_exchange(temp: Tensor, geom: Geometry, p: dict[str, Tensor], dt: float)
 # --- one step -------------------------------------------------------------------------------
 
 
+def physics_flow(state: State, geom: Geometry, p: dict[str, Tensor]) -> tuple[Tensor, Tensor]:
+    """The buoyancy-driven stream function (B, H+1, W+1), per second, and the raw solver
+    solution (to warm-start the next solve)."""
+    return stokes_stream(
+        buoyancy(state, geom, p), geom, p["mobility"], viscosity(state, p), state.flow
+    )
+
+
+def cell_velocity(psi: Tensor, geom: Geometry) -> tuple[Tensor, Tensor]:
+    """Velocity at cell centers (B, H, W) for a stream function: rightward and upward."""
+    fx, fy = faces_from_stream(psi, geom)
+    vx = 0.5 * (fx[:, :, :-1] + fx[:, :, 1:])
+    vy = -0.5 * (fy[:, :-1, :] + fy[:, 1:, :])  # fy points down the rows
+    return vx, vy
+
+
 def step(
     state: State,
     geom: Geometry,
@@ -438,11 +515,26 @@ def step(
     exchange_extra: additional wax exchange rates (sx, sy) on faces, in the same signed form
     as cohesion_faces uses before capping (positive moves wax right / down).
     """
-    psi, flow = stokes_stream(
-        buoyancy(state, geom, p), geom, p["mobility"], viscosity(state, p), state.flow
-    )
+    psi, flow = physics_flow(state, geom, p)
     if psi_extra is not None:
         psi = psi + psi_extra
+    return advance(state, geom, p, dt, psi, flow, exchange_extra)
+
+
+def advance(
+    state: State,
+    geom: Geometry,
+    p: dict[str, Tensor],
+    dt: float,
+    psi: Tensor,
+    flow: Tensor | None = None,
+    exchange_extra: tuple[Tensor, Tensor] | None = None,
+) -> State:
+    """Advance by dt seconds with a given total stream function psi (per second).
+
+    Everything after the flow solve: transport, compression, cohesion, any extra exchange,
+    and heat. flow is the solver solution to carry forward for warm starts.
+    """
     fx, fy = faces_from_stream(psi * dt, geom)
     n = substeps(outflow(fx, fy))
     fx, fy = fx / n, fy / n
@@ -461,4 +553,5 @@ def step(
     temp = conduct(temp, wax, geom, p, dt)
     temp = heat_exchange(temp, geom, p, dt)
     # No clamping: bounds hold by construction, and clamping would break exact conservation.
-    return State(wax=wax, temp=temp, hidden=hidden, flow=flow.detach())
+    flow = None if flow is None else flow.detach()
+    return State(wax=wax, temp=temp, hidden=hidden, flow=flow)

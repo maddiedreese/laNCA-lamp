@@ -191,6 +191,16 @@ def test_variable_solver_matches_direct_solver_at_uniform_viscosity():
     assert (direct - iterative).abs().max() < 1e-6 * direct.abs().max()
 
 
+def test_vessel_biharmonic_is_exact_on_the_vessel_shape():
+    g = _geom()
+    gen = torch.Generator().manual_seed(9)
+    f = torch.randn(2, H - 1, W - 1, generator=gen, dtype=torch.float64) * g.free_inner
+    x = g.vessel_biharmonic(f)
+    lhs = ph.stokes_operator(x, torch.ones(2, H, W, dtype=torch.float64), g)
+    assert (lhs - f).abs().max() < 1e-8 * f.abs().max()
+    assert (x * (1 - g.free_inner)).abs().max() == 0
+
+
 def test_stokes_operator_is_symmetric_positive_definite():
     g = _geom()
     gen = torch.Generator().manual_seed(6)
@@ -214,6 +224,22 @@ def test_solver_converges_with_viscosity_contrast():
     resid = ph.stokes_operator(x, mu, g) - f * g.free_inner
     assert float(resid.norm()) < 1e-7 * float((f * g.free_inner).norm())
     assert iters < 300
+
+
+def test_solver_stays_finite_when_iterating_past_convergence():
+    # Mixed batch in float32: an easy item, a hard item, and one with no force at all.
+    # With tol=0 every item keeps going until rounding noise, which used to produce NaN.
+    g = _geom(torch.float32)
+    gen = torch.Generator().manual_seed(10)
+    f = torch.randn(3, H - 1, W - 1, generator=gen) * g.free_inner
+    f[2] = 0
+    mu = torch.ones(3, H, W)
+    mu[1] = torch.exp(5 * torch.rand(H, W, generator=gen))
+    x, _ = ph.solve_stokes(f, mu, g, tol=0.0, max_iter=300)
+    assert torch.isfinite(x).all()
+    assert x[2].abs().max() == 0
+    resid = ph.stokes_operator(x, mu, g) - f * g.free_inner
+    assert float(resid[:2].norm()) < 1e-3 * float(f[:2].norm())
 
 
 def _blob_velocity_spread(visc_wax: float) -> float:
