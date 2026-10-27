@@ -58,10 +58,12 @@ regenerated locally.
   flow through the glass. The built-in flow is slow viscous (Stokes) flow driven by buoyancy,
   with wax ~100x more viscous than the liquid and stiffer when cold, solved by preconditioned
   conjugate gradients, preconditioned with an exact uniform-viscosity solve on the vessel's
-  shape. The learned model adds its own stream function on top.
+  shape. Gradients through the solve come from its adjoint (one more solve), not from the
+  iterations. The learned model adds its own stream function on top.
 - **Transport** of wax and heat by conservative upwind fluxes: wax stays in [0, 1] and its
   total is exact to float rounding. Interface compression after each substep cancels the
-  smearing that upwind transport causes, in proportion to the flow.
+  smearing that upwind transport causes, in proportion to the flow. Gradients skip the
+  direction of its interface normals, whose derivative blows up where wax is nearly flat.
 - **Surface tension**, Cahn-Hilliard style: wax flows down a chemical potential that is high
   on bumps and thin bits, which shortens outlines, rounds blobs and drives pinch-off. It is a
   conservative, bounded exchange, explicit and stiff (hundreds of cheap substeps per step);
@@ -146,7 +148,8 @@ rollouts, temperature warm-up, behavior statistics, fitting the constants) is Ph
 
 ```bash
 uv run python -m lanca.fit_constants --generations 6 --population 8 --workers 4   # stage A
-uv run python -m lanca.train --stage B --name stage_b --iters 400                 # stage B
+uv run python -m lanca.train --stage B --name stage_b --constants fits/tension.json \
+    --temps tension10_fast --flow-grad --curriculum 16 32 64 128 --eval-free 128 --iters 300  # stage B
 uv run python -m lanca.baseline --checkpoint runs/train/stage_b/best.pt --name trained
 ```
 
@@ -159,7 +162,9 @@ uv run python -m lanca.baseline --checkpoint runs/train/stage_b/best.pt --name t
   started at the baseline's temperature for that minute and warmed up on real frames, plus a
   pool of the model's own long runs scored against the real lamp at the same age.
   Losses: frame error plus behavior statistics (`losses.py`: sharpness, edges, spectrum,
-  activity, vertical profile).
+  activity, vertical profile, blob size distribution). With `--flow-grad`, gradients pass through the flow solve, so
+  the network learns how its changes move the buoyancy-driven flow later on. Free runs grow
+  to 128 steps (64 s, about one lamp cycle).
 - **Stage C**: joint fine-tune. Without gradients through the flow solve it can only move
   the minor constants, and it didn't improve on stage B.
 
@@ -172,33 +177,56 @@ uv run python -m lanca.baseline --checkpoint runs/train/stage_b/best.pt --name t
 Results, 2-hour free runs from the cold start (score: stage A's weighted log-error, lower is
 better):
 
-| | real | fitted physics, cohesion | tension physics | trained, straight-through tension | trained, tension gradients |
-|---|---|---|---|---|---|
-| score | - | 13.4 | **9.0** | 10.1 | 9.9 |
-| first blob | 812 s | 487 s | 1126 s | 1444 s | 1421 s |
-| regular cycling from | 2831 s | 1353 s | 2028 s | 1794 s | 1958 s |
-| cycle period | 66 s | 122 s | **78 s** | 95 s | 159 s |
-| rise speed (lamp heights/s) | 0.023 | 0.0097 | 0.0071 | 0.0084 | 0.0080 |
-| typical blob size | 0.083 | 0.009 | 0.018 | 0.014 | 0.018 |
-| merges per minute | 8.5 | 6.3 | 5.0 | 6.6 | 5.2 |
-| edge per unit wax | 0.13 | 0.46 | 0.32 | 0.33 | 0.32 |
+| | real | fitted physics, cohesion | tension physics | trained, before the gradient fix | trained, flow gradients, after the fix | trained, size loss |
+|---|---|---|---|---|---|---|
+| score | - | 13.4 | 9.0 | 9.9-10.1 | 17.9 | **7.0** |
+| first blob | 812 s | 487 s | 1126 s | 1421 s | 1152 s | 1779 s |
+| regular cycling from | 2831 s | 1353 s | 2028 s | 1958 s | 1794 s | 2250 s |
+| cycle period | 66 s | 122 s | **78 s** | 159 s | 91 s | 161 s |
+| rise speed (lamp heights/s) | 0.023 | 0.0097 | 0.0071 | 0.0080 | **0.0128** | 0.0122 |
+| sink speed | 0.019 | 0.0089 | 0.0068 | 0.0081 | **0.0158** | 0.0099 |
+| typical blob size | 0.083 | 0.009 | 0.018 | 0.018 | 0.005 | **0.023** |
+| merges per minute | 8.5 | 6.3 | 5.0 | 5.2 | 5.4 | 4.7 |
+| edge per unit wax | 0.13 | 0.46 | 0.32 | 0.32 | 0.31 | **0.30** |
 
 With surface tension the blobs are smooth and solid, the cold pool holds through warm-up, and
 the cycle period is within 20% of the real lamp. Still off: blobs are about 5x too small and
 tend to hug the walls, and wax rises about 3x too slowly.
 
-The network trained on top of the tension physics barely learned: its held-out behavior error
-stayed flat (about 0.39) for all 400 iterations, and in 2-hour runs it is slightly worse than
-the physics alone. The first suspect was the straight-through gradient through surface
-tension, so the model now differentiates through the last 8 tension substeps. Retrained the
-same way, the network still didn't learn (held-out behavior 0.390 at the start, 0.389 at the
-end; its output layer moved about as far as before). Its 2-hour run keeps the physics' blob
-size and edges and scores 9.9, between the two, but cycles about half as often. So the
-gradient path through tension was not what held training back. The remaining gaps (blobs 5x
-too small, wax hugging the walls, rising 3x too slowly) are set by the flow, and stage B
-doesn't differentiate through the flow solve, while the network's stream-function correction
-gets only 32-step (16 s) windows to learn from. An earlier network trained on the cohesion
-physics improved short-window behavior error by 45% but shredded wax in long runs.
+**Why the first trained networks didn't learn.** Three stage B runs on the tension physics
+(straight-through tension, gradients through the last tension substeps, and gradients
+through the flow with 64 s windows) all left held-out behavior error flat. The cause was a
+gradient bug, not the model: interface compression normalizes the wax gradient to get a unit
+normal, and that normal's derivative is about 1 / |grad wax|, enormous where wax is nearly
+flat. Through it, gradients grew about a million-fold in one step. In training, gradient
+norms reached about 30,000 at 32-step windows, 10^12 at 64 and infinity at 128; clipped to 1
+they were mostly noise, and at 128 steps every batch was skipped. Gradients now skip the
+normals' direction (the simulation is unchanged), and through 16 physics steps they stay
+around 10 instead of reaching 10^10.
+
+**After the fix**, the network trained with flow gradients and windows growing to 128 steps
+does learn: held-out behavior error on 64 s windows fell from 0.78 (physics alone) to 0.62
+over 300 iterations (4.5 hours), with no skipped batches. In 2-hour runs, wax rises and
+sinks almost twice as fast as the physics alone, closer to the real lamp, and the cycle
+period is 91 s. But the network also sheds a haze of tiny fragments, so the median blob is a
+speck (0.005), and early in warm-up a thin sheet of wax runs up the right wall. Blob size
+dominates the score, so it scores 17.9. Its main blobs are larger than that number suggests;
+the behavior losses don't penalize small debris directly (the spectrum term barely sees it),
+which is the next thing to fix.
+
+**Blob size loss.** The behavior losses barely saw fragments, so a size distribution joined
+them (`losses.sizes`): the log of the share of wax removed by morphological openings (erode,
+then dilate back) of radius 1, 2, 4 and 7 cells. Specks and thin sheets vanish at small radii,
+real blobs survive. Trained the same way with it, the model is the first to beat the physics
+alone in 2-hour runs (score 7.0 vs 9.0): no haze, no sheet up the wall, the cold pool holds
+for half an hour, and blobs are the largest yet (0.023), with wax rising and sinking faster.
+Its cycle is slow (161 s), and wax collects near the top.
+
+**Why blobs are still small.** In the footage the wax's visible area grows as the lamp heats:
+0.12 of the glass in the first 10 minutes, 0.25-0.46 once it cycles (melted wax expands, and
+the cold slab hides behind the base). The simulator conserves the wax it starts with, 0.12,
+so while cycling it has under half the real wax, and equal blob counts mean blobs 2-3x
+smaller. Wax volume that grows with temperature (thermal expansion) is the next fix.
 
 ## Footage
 

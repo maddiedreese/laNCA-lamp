@@ -18,7 +18,10 @@ Each iteration mixes two kinds of rollouts:
   held-out part of the recording.
 
 Free-run length grows over training (a curriculum), and the last 15 minutes of footage are
-held out for evaluation. Stage B trains the network with the constants fixed (from stage A's
+held out for evaluation. With --flow-grad, gradients also pass through the physics flow solve
+(by its adjoint, about 30% more time per iteration), so the network learns how its changes to
+wax and heat move the buoyancy-driven flow later on: blob size, rise speed and the cycle are
+all set by that flow. Stage B trains the network with the constants fixed (from stage A's
 runs/fit/constants.json when present). Stage C fine-tunes both at lower learning rates;
 without flow gradients, only constants that act after the flow solve (surface tension, compression,
 heat) can move, which is all a short fine-tune can afford.
@@ -123,7 +126,13 @@ class Trainer:
                 flow=torch.cat([state.flow] + [s.flow for s in pooled]),
             )
         final, pred = self.model.rollout(
-            state, self.geom, free, DT, self.gen, checkpoint_every=a.checkpoint
+            state,
+            self.geom,
+            free,
+            DT,
+            self.gen,
+            checkpoint_every=a.checkpoint,
+            flow_grad=a.flow_grad,
         )
 
         frame = losses.masked_mse(pred[:, :n_real], target, self.vessel)
@@ -195,8 +204,9 @@ class Trainer:
         }
 
     @torch.no_grad()
-    def evaluate(self, free: int = 32) -> dict:
+    def evaluate(self) -> dict:
         """Held-out windows from the last 15 minutes: frame error and behavior error."""
+        free = self.args.eval_free
         n = len(self.footage.masks)
         starts = np.linspace(self.held_out, n - self.args.warmup - free - 2, 16).astype(int)
         gen_state = self.gen.get_state()
@@ -242,6 +252,8 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--lr-physics", type=float, default=3e-3)
     ap.add_argument("--checkpoint", type=int, default=8, help="gradient checkpoint segment length")
+    ap.add_argument("--flow-grad", action="store_true", help="differentiate through the flow solve")
+    ap.add_argument("--eval-free", type=int, default=32, help="free steps in held-out windows")
     ap.add_argument("--eval-every", type=int, default=50)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="mps" if torch.backends.mps.is_available() else "cpu")

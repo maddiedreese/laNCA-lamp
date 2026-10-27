@@ -116,6 +116,24 @@ def test_full_step_conserves_wax_and_keeps_temperature_in_range():
     assert s.temp.min() >= -1e-9 and s.temp.max() <= 1 + 1e-9
 
 
+def test_compression_keeps_gradients_tame():
+    # Nearly flat part-wax (tiny ripples on a soft blob) is where a differentiated unit normal
+    # used to explode: about 120x the gradient without compression, after one step.
+    g = _geom()
+    gen = torch.Generator().manual_seed(11)
+    s = _blob_state(g, 0.9, 0.3)
+    readout = torch.randn(1, H, W, generator=gen, dtype=torch.float64)
+    ripple = 1e-7 * torch.rand(1, H, W, generator=gen, dtype=torch.float64)
+    norms = []
+    for compress in (0.0, 2.0):
+        p = _params(compress=compress, mobility=0.2)
+        wax = ((0.5 * s.wax + 0.25 + ripple) * g.vessel).requires_grad_()
+        out = ph.step(ph.State(wax=wax, temp=s.temp), g, p, dt=0.5)
+        (grad,) = torch.autograd.grad((out.wax * readout).sum(), wax)
+        norms.append(float(grad.norm()))
+    assert norms[1] < 3 * norms[0]
+
+
 def test_heat_without_wax_settles_warm_at_the_bottom():
     g = _geom()
     p = _params(tension=0.0)  # no wax, so skip the (costly) surface tension substeps
@@ -282,6 +300,29 @@ def test_solver_converges_with_viscosity_contrast():
     resid = ph.stokes_operator(x, mu, g) - f * g.free_inner
     assert float(resid.norm()) < 1e-7 * float((f * g.free_inner).norm())
     assert iters < 300
+
+
+def test_adjoint_solver_gradients_match_finite_differences():
+    g = _geom()
+    gen = torch.Generator().manual_seed(8)
+    s = _blob_state(g, 0.9, 0.3)
+    mu = ph.viscosity(s, _params(visc_wax=300.0)).requires_grad_()
+    f = ph.buoyancy_rhs(torch.randn(1, H, W, generator=gen, dtype=torch.float64), g)
+    f.requires_grad_()
+    weight = torch.randn(1, H - 1, W - 1, generator=gen, dtype=torch.float64)
+
+    def loss(f, mu):
+        return (ph.solve_stokes_adjoint(f, mu, g, tol=1e-13) * weight).sum()
+
+    loss(f, mu).backward()
+    df = torch.randn(f.shape, generator=gen, dtype=torch.float64) * g.free_inner
+    dlog = torch.randn(mu.shape, generator=gen, dtype=torch.float64) * g.vessel
+    with torch.no_grad():
+        h = 1e-5
+        fd_f = (loss(f + h * df, mu) - loss(f - h * df, mu)) / (2 * h)
+        fd_mu = (loss(f, mu * torch.exp(h * dlog)) - loss(f, mu * torch.exp(-h * dlog))) / (2 * h)
+    assert abs(float((f.grad * df).sum() - fd_f)) < 1e-6 * abs(float(fd_f))
+    assert abs(float((mu.grad * mu.detach() * dlog).sum() - fd_mu)) < 1e-5 * abs(float(fd_mu))
 
 
 def test_solver_stays_finite_when_iterating_past_convergence():

@@ -319,6 +319,42 @@ def solve_stokes(
     return x, max_iter
 
 
+class _AdjointStokes(torch.autograd.Function):
+    """solve_stokes with gradients from the adjoint equation instead of through the iterations.
+
+    If A(mu) x = rhs, then for an upstream gradient g, with lam = A^-1 g (A is symmetric):
+    d/d rhs = lam and d/d mu = -lam . dA/dmu x. So backward costs one more solve and stores
+    only x, where differentiating the conjugate-gradient loop stores every iteration. The warm
+    start gets no gradient: it only changes how fast the solve converges, not its answer.
+    """
+
+    @staticmethod
+    def forward(ctx, rhs, mu, geom, x0, tol):
+        x, _ = solve_stokes(rhs, mu, geom, x0, tol)
+        ctx.save_for_backward(x, mu)
+        ctx.geom, ctx.tol = geom, tol
+        return x
+
+    @staticmethod
+    def backward(ctx, grad):
+        x, mu = ctx.saved_tensors
+        geom = ctx.geom
+        lam, _ = solve_stokes(grad, mu, geom, tol=ctx.tol)
+        grad_mu = None
+        if ctx.needs_input_grad[1]:
+            with torch.enable_grad():
+                m = mu.detach().requires_grad_()
+                (grad_mu,) = torch.autograd.grad(stokes_operator(x, m, geom), m, -lam)
+        return lam * geom.free_inner, grad_mu, None, None, None
+
+
+def solve_stokes_adjoint(
+    rhs: Tensor, mu: Tensor, geom: Geometry, x0: Tensor | None = None, tol: float = 1e-2
+) -> Tensor:
+    """solve_stokes's solution, differentiable in rhs and mu at the cost of one extra solve."""
+    return _AdjointStokes.apply(rhs, mu, geom, x0, tol)
+
+
 def buoyancy_rhs(buoyancy: Tensor, geom: Geometry) -> Tensor:
     """Force term of the stream-function equation: d(buoyancy)/dx on interior corners."""
     b = buoyancy * geom.vessel
@@ -335,14 +371,14 @@ def stokes_stream(
     """Stream function (B, H+1, W+1) of slow viscous flow driven by an upward force (B, H, W).
 
     With mu None, the viscosity is uniform and the solution is direct and exact on the
-    vessel's shape. With mu, the variable-viscosity equation is solved iteratively. Also
-    returns the raw solution, to warm-start the next call.
+    vessel's shape. With mu, the variable-viscosity equation is solved iteratively, with
+    adjoint gradients. Also returns the raw solution, to warm-start the next call.
     """
     f = buoyancy_rhs(buoyancy, geom)
     if mu is None:
         x = geom.vessel_biharmonic(f)
     else:
-        x, _ = solve_stokes(f, mu, geom, x0)
+        x = solve_stokes_adjoint(f, mu, geom, x0)
     # Sign convention checked by test_hot_wax_rises_and_cold_wax_sinks: with rows growing
     # downward and faces_from_stream's orientation, this sign makes positive buoyancy rise.
     return mobility * F.pad(x, (1, 1, 1, 1)), x
@@ -478,15 +514,20 @@ def compression_faces(
     wax) at a rate proportional to the flow through each face, as in volume-of-fluid methods,
     so the correction scales with the blur it cancels. Normals come from the lightly blurred
     wax field and are averaged onto faces.
+
+    Gradients don't flow through the normals' direction. A unit normal's derivative is about
+    1 / |grad wax|, which is enormous where the wax is nearly flat and the direction means
+    nothing; through it, gradients grew about a million-fold in a single step and kept
+    growing over a rollout, so training saw mostly noise. They still see how much
+    compression moves wax, through the flow and the wax itself.
     """
-    blur = F.avg_pool2d(F.pad(wax[:, None], (1, 1, 1, 1), mode="replicate"), 3, 1)[:, 0]
-    bp = F.pad(blur, (1, 1, 1, 1), mode="replicate")
-    gx = 0.5 * (bp[:, 1:-1, 2:] - bp[:, 1:-1, :-2])
-    gy = 0.5 * (bp[:, 2:, 1:-1] - bp[:, :-2, 1:-1])
-    # The epsilon goes inside the root: sqrt has an infinite derivative at 0, which would turn
-    # gradients into NaN wherever the wax is flat.
-    mag = torch.sqrt(gx**2 + gy**2 + 1e-12)
-    nx, ny = gx / mag, gy / mag
+    with torch.no_grad():
+        blur = F.avg_pool2d(F.pad(wax[:, None], (1, 1, 1, 1), mode="replicate"), 3, 1)[:, 0]
+        bp = F.pad(blur, (1, 1, 1, 1), mode="replicate")
+        gx = 0.5 * (bp[:, 1:-1, 2:] - bp[:, 1:-1, :-2])
+        gy = 0.5 * (bp[:, 2:, 1:-1] - bp[:, :-2, 1:-1])
+        mag = torch.sqrt(gx**2 + gy**2 + 1e-12)
+        nx, ny = gx / mag, gy / mag
     nxp = F.pad(nx, (1, 1, 0, 0))
     nyp = F.pad(ny, (0, 0, 1, 1))
     nx_face = 0.5 * (nxp[:, :, :-1] + nxp[:, :, 1:])

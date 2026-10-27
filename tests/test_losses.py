@@ -27,6 +27,28 @@ def test_spectrum_tells_big_blobs_from_small_ones():
     assert (big[low].mean() - big[high].mean()) > (small[low].mean() - small[high].mean())
 
 
+def test_sizes_tell_blobs_from_fragments_and_wall_sheets():
+    vessel = torch.zeros(H, W)
+    vessel[2:-2, 2:-2] = 1
+    blob = torch.zeros(1, H, W)
+    blob[0, 20:36, 8:24] = 1.0
+    fragments = torch.zeros(1, H, W)
+    fragments[0, 4:60:4, 4:28:4] = 1.0  # single-cell specks
+    sheet = torch.zeros(1, H, W)
+    sheet[0, 4:60, 2:4] = 1.0  # two cells thick, against the glass
+    # Log of the share of wax removed at each radius: about nothing for a big blob, all of it
+    # for specks and the sheet.
+    lost = {
+        k: losses.sizes(v, vessel).exp()
+        for k, v in [("blob", blob), ("frag", fragments), ("sheet", sheet)]
+    }
+    assert lost["blob"][:3].max() < 0.01
+    assert lost["frag"].min() > 0.99 and lost["sheet"].min() > 0.99
+    w = (blob + 0.3 * fragments).requires_grad_()
+    losses.sizes(w, vessel).sum().backward()
+    assert torch.isfinite(w.grad).all() and w.grad.abs().sum() > 0
+
+
 def test_edges_penalize_speckle_but_not_round_blobs():
     vessel = torch.ones(H, W)
     blob = _blobs(1, 16)

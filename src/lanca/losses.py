@@ -9,6 +9,9 @@ smear gets wrong, computed from batches of frames (T, B, H, W):
   and porous blobs have a lot. Needed because speckle is perfectly sharp, so sharpness alone
   rewards it (measured: real 0.13, a model trained without this term 0.62).
 - spectrum: radially binned power spectrum of the wax field, a proxy for blob sizes.
+- sizes: blob size distribution, from how much wax morphological openings of growing radius
+  remove. Penalizes fragments and thin sheets directly, which the spectrum barely sees: a
+  model trained without it shed a haze of specks that made its median blob 17x too small.
 - activity: mean |w(t+1) - w(t)| per step, a proxy for how fast wax moves.
 - profile: time-averaged wax per row, where in the lamp the wax spends its time.
 """
@@ -46,6 +49,33 @@ def profile(w: Tensor, vessel: Tensor) -> Tensor:
     return (w * vessel).mean(dim=tuple(range(w.dim() - 2))).sum(-1) / vessel.sum(-1).clamp(min=1)
 
 
+SIZE_RADII = (1, 2, 4, 7)
+
+
+def sizes(w: Tensor, vessel: Tensor, radii: tuple[int, ...] = SIZE_RADII) -> Tensor:
+    """Blob size distribution: log of the share of wax removed by a morphological opening at
+    each radius, averaged over frames (len(radii),).
+
+    Opening (erode with a (2r+1)-cell square, then dilate back) removes every piece of wax
+    narrower than the square, and keeps wider pieces whole. Fragments and thin sheets vanish
+    at small radii, while real lamp blobs (~20 cells across) survive most of them. Outside the
+    glass counts as empty, so a sheet clinging to the wall erodes too. Built from max-pooling,
+    so it passes gradients to the wax that survives.
+
+    The log makes small shares count: the real lamp loses 0.7% of its wax at radius 1 and
+    simulations ~3%, a gap as telling as 14% vs 80% lost at radius 7.
+    """
+    flat = (w * vessel).reshape(-1, 1, *w.shape[-2:])
+    total = flat.sum((-2, -1)) + 1e-6
+    shares = []
+    for r in radii:
+        k = 2 * r + 1
+        eroded = -torch.nn.functional.max_pool2d(-flat, k, 1, r)
+        opened = torch.nn.functional.max_pool2d(eroded, k, 1, r) * vessel
+        shares.append((1 - opened.sum((-2, -1)) / total).mean())
+    return torch.log(torch.stack(shares).clamp(min=0) + 1e-3)
+
+
 class Spectrum:
     """Radially binned log power spectrum of the mean-removed wax field inside the vessel."""
 
@@ -81,12 +111,21 @@ def behavior(w: Tensor, vessel: Tensor, spectrum: Spectrum) -> dict[str, Tensor]
         "activity": activity(w, vessel),
         "profile": profile(w, vessel),
         "spectrum": spectrum(w, vessel),
+        "sizes": sizes(w, vessel),
     }
 
 
 # Chosen so each term's typical gap between a simulation and the footage contributes ~0.1
-# (measured gaps: edges ~0.4, activity ~0.025, spectrum ~1 in log power per bin).
-WEIGHTS = {"sharpness": 20.0, "edges": 1.0, "activity": 200.0, "profile": 2.0, "spectrum": 0.2}
+# (measured gaps: edges ~0.4, activity ~0.025, spectrum ~1 in log power per bin). Sizes gets a
+# little more (its squared log gap is ~3.5, so ~0.17): it is the largest gap left.
+WEIGHTS = {
+    "sharpness": 20.0,
+    "edges": 1.0,
+    "activity": 200.0,
+    "profile": 2.0,
+    "spectrum": 0.2,
+    "sizes": 0.05,
+}
 
 
 def behavior_loss(
