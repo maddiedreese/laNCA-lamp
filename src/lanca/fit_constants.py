@@ -1,12 +1,19 @@
 """Phase 5, stage A: fit the physical constants to the lamp's timing and behavior.
 
     uv run python -m lanca.fit_constants --generations 6 --population 8 --workers 4
+    uv run python -m lanca.fit_constants --init fits/tension.json --set cool_wall=0.0022 \
+        --sigma 0.25 --seeds 2 --name refit
 
 Timing only shows up over whole runs (warm-up takes ~45 minutes), and differentiating through
 thousands of flow solves is impractical, so this is a derivative-free search: the
 cross-entropy method in log space. Each candidate set of constants runs the physics alone for
 the full 2 hours from the real cold start, and is scored by how far its behavior stats are
-from the footage's. The best constants go to runs/fit/constants.json for stages B and C.
+from the footage's. The best constants go to runs/fit/constants.json for stages B and C
+(runs/fit/<name>/constants.json with --name).
+
+Runs are chaotic, so one run per candidate rewards luck; --seeds averages each candidate's
+score over several noise seeds. --init starts the search from a constants file (constants
+not searched are kept fixed at its values) instead of the defaults.
 """
 
 import argparse
@@ -41,7 +48,8 @@ TARGETS = [
     ("cycle_period_s", 2.0, lambda s: s["cycling"]["cycle_period_s"]),
     ("rise_speed", 2.0, lambda s: (s["cycling"]["rise_speed"] or {}).get("p50")),
     ("sink_speed", 1.0, lambda s: (s["cycling"]["sink_speed"] or {}).get("p50")),
-    ("blob_area", 2.0, lambda s: (s["cycling"]["blob_area"] or {}).get("p50")),
+    # Blob size relative to the lamp's own wax: see measure.track.
+    ("blob_share", 2.0, lambda s: (s["cycling"]["blob_share"] or {}).get("p50")),
     ("free_blobs", 0.5, lambda s: s["cycling"]["free_blobs"]["p50"] + 1),
     ("height", 1.0, lambda s: s["cycling"]["height"]["p50"]),
     ("merges", 0.5, lambda s: s["cycling"]["merges_per_min"] + 0.5),
@@ -65,7 +73,7 @@ def score(sim: dict, real: dict) -> tuple[float, dict]:
 
 def evaluate(args: tuple[dict, int, float]) -> dict:
     """Run one candidate in a worker process and return its stats and score."""
-    overrides, threads, minutes = args
+    overrides, threads, minutes, seed = args
     import torch
 
     from lanca import measure
@@ -76,12 +84,27 @@ def evaluate(args: tuple[dict, int, float]) -> dict:
     real = json.loads((ROOT / "stats" / "lamp-2026-10-25.json").read_text())
     start = time.time()
     try:
-        frames, _, vessel = run(ph.Params(**overrides), minutes, 0.5, "cpu")
+        frames, _, vessel = run(ph.Params(**overrides), minutes, 0.5, "cpu", seed=seed)
         stats, _ = measure.summarize(frames.astype(np.float32) / 255, vessel, 2.0)
         total, parts = score(stats, real)
     except RuntimeError as err:  # a non-finite run counts as a failure, not a crash
         stats, total, parts = None, float("inf"), {"error": str(err)}
     return {"constants": overrides, "score": total, "parts": parts, "seconds": time.time() - start}
+
+
+def average(results: list[dict]) -> dict:
+    """One candidate's runs over several seeds: mean score and parts."""
+    parts = {
+        k: float(np.mean([r["parts"].get(k, MISSING) for r in results]))
+        for k in results[0]["parts"]
+    }
+    return {
+        "constants": results[0]["constants"],
+        "score": float(np.mean([r["score"] for r in results])),
+        "seed_scores": [r["score"] for r in results],
+        "parts": parts,
+        "seconds": float(sum(r["seconds"] for r in results)),
+    }
 
 
 def to_vector(constants: dict) -> np.ndarray:
@@ -110,15 +133,27 @@ def main() -> None:
     ap.add_argument("--threads", type=int, default=2, help="CPU threads per worker")
     ap.add_argument("--minutes", type=float, default=120.0)
     ap.add_argument("--sigma", type=float, default=0.5, help="initial spread (log space)")
+    ap.add_argument("--seeds", type=int, default=1, help="noise seeds per candidate")
+    ap.add_argument("--init", type=Path, default=None, help="constants file to start from")
+    ap.add_argument(
+        "--set", nargs="*", default=[], metavar="NAME=VALUE", help="override starting constants"
+    )
+    ap.add_argument("--name", default=None, help="write to runs/fit/<name>/")
     args = ap.parse_args()
 
     from lanca.physics import PARAM_BOUNDS
 
-    out = ROOT / "runs" / "fit"
+    out = ROOT / "runs" / "fit" / (args.name or "")
     out.mkdir(parents=True, exist_ok=True)
-    mean = to_vector({k: PARAM_BOUNDS[k][2] for k in SEARCH})
+    start = {k: v[2] for k, v in PARAM_BOUNDS.items()}
+    if args.init:
+        saved = json.loads(args.init.read_text())["constants"]
+        start.update({k: v for k, v in saved.items() if k in PARAM_BOUNDS})
+    start.update({k: float(v) for k, v in (kv.split("=") for kv in args.set)})
+    fixed = {k: v for k, v in start.items() if k not in SEARCH}
+    mean = to_vector(start)
     sigma = np.full(len(SEARCH), args.sigma)
-    sigma[SEARCH.index("float_temp")] = 0.08
+    sigma[SEARCH.index("float_temp")] = 0.16 * args.sigma
     rng = np.random.default_rng(0)
     history: list[dict] = []
     best: dict | None = None
@@ -129,10 +164,14 @@ def main() -> None:
             vectors = [mean] + [
                 mean + sigma * rng.standard_normal(len(SEARCH)) for _ in range(args.population - 1)
             ]
-            candidates = [from_vector(v) for v in vectors]
-            results = list(
-                pool.map(evaluate, [(c, args.threads, args.minutes) for c in candidates])
-            )
+            candidates = [{**fixed, **from_vector(v)} for v in vectors]
+            jobs = [
+                (c, args.threads, args.minutes, s) for c in candidates for s in range(args.seeds)
+            ]
+            runs = list(pool.map(evaluate, jobs))
+            results = [
+                average(runs[i * args.seeds : (i + 1) * args.seeds]) for i in range(len(candidates))
+            ]
             for r in results:
                 r["generation"] = gen
             history += results

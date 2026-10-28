@@ -35,6 +35,7 @@ COMPARE = [
     ("rise speed p50", lambda s: (s["cycling"]["rise_speed"] or {}).get("p50")),
     ("sink speed p50", lambda s: (s["cycling"]["sink_speed"] or {}).get("p50")),
     ("blob area p50", lambda s: (s["cycling"]["blob_area"] or {}).get("p50")),
+    ("blob share p50", lambda s: (s["cycling"]["blob_share"] or {}).get("p50")),
     ("merges / min", lambda s: s["cycling"]["merges_per_min"]),
 ]
 

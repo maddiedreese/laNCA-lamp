@@ -144,13 +144,16 @@ class State:
 
     Both are (B, H, W). hidden is (B, C, H, W) of extra channels for the learned model; the
     physics carries it along with the flow but otherwise leaves it alone. flow is the last
-    buoyancy flow solution (B, H-1, W-1), kept only to warm-start the next solve.
+    buoyancy flow solution (B, H-1, W-1), kept only to warm-start the next solve. mass is
+    the lamp's wax_mass (B, 1, 1) when wax expands, fixed from the first step on; states
+    rebuilt without it recompute it.
     """
 
     wax: Tensor
     temp: Tensor
     hidden: Tensor | None = None
     flow: Tensor | None = None
+    mass: Tensor | None = None
 
 
 PARAM_BOUNDS = {
@@ -170,9 +173,19 @@ PARAM_BOUNDS = {
     "visc_wax": (1.0, 1000.0, 100.0),  # wax viscosity / liquid viscosity at float_temp
     "visc_melt": (0.0, 10.0, 3.0),  # wax stiffens by exp(visc_melt) per unit drop in T
     "compress": (0.0, 4.0, 2.0),  # interface compression, relative to the flow through a face
+    # Melted wax takes 1 + expand times the volume of solid wax. Paraffin expands ~10-20% on
+    # melting; the footage's wax looks 2-3x larger once melted, but that is mostly the view
+    # (see measure.track), and matching it physically stalled the lamp.
+    "expand": (0.0, 0.3, 0.0),
 }
 
-MAX_VISCOSITY = 1e4  # cap on the viscosity ratio, to keep the flow solver well conditioned
+MAX_VISCOSITY = 1e4
+# Wax melts (and expands) over a band just below its float temperature: halfway at
+# float_temp - MELT_BELOW, with a width of MELT_WIDTH.
+MELT_BELOW, MELT_WIDTH = (
+    0.05,
+    0.02,
+)  # cap on the viscosity ratio, to keep the flow solver well conditioned
 
 
 class Params(nn.Module):
@@ -188,6 +201,16 @@ class Params(nn.Module):
         self.register_buffer("lo", lo)
         self.register_buffer("hi", hi)
         self.raw = nn.Parameter(torch.logit(frac))
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        # Checkpoints from before a constant was added (new ones go at the end) get its default.
+        saved = state_dict.get(prefix + "raw")
+        if saved is not None and saved.numel() < self.raw.numel():
+            state_dict[prefix + "raw"] = torch.cat(
+                [saved, self.raw.data[saved.numel() :].to(saved)]
+            )
+            state_dict[prefix + "lo"], state_dict[prefix + "hi"] = self.lo, self.hi
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     def values(self) -> dict[str, Tensor]:
         v = self.lo + (self.hi - self.lo) * torch.sigmoid(self.raw)
@@ -583,6 +606,146 @@ def heat_exchange(temp: Tensor, geom: Geometry, p: dict[str, Tensor], dt: float)
     return (target + (temp - target) * torch.exp(-rate * dt)) * geom.vessel
 
 
+# --- thermal expansion ----------------------------------------------------------------------
+
+
+def melted_volume(temp: Tensor, p: dict[str, Tensor]) -> Tensor:
+    """Volume of wax at temp relative to solid wax: 1 when cold, 1 + expand once melted."""
+    melted = torch.sigmoid((temp - p["float_temp"] + MELT_BELOW) / MELT_WIDTH)
+    return 1 + p["expand"] * melted
+
+
+def neumann_poisson(f: Tensor, geom: Geometry, tol: float = 1e-3, max_iter: int = 500) -> Tensor:
+    """Solve -laplacian(phi) = f on the vessel cells with no flow through the glass.
+
+    f (B, H, W) must sum to zero over each lamp. Jacobi-preconditioned conjugate gradients;
+    the expansion flows are tiny, so a loose tolerance is plenty.
+    """
+    v = geom.vessel
+    deg = (geom.open_x[:, :-1] + geom.open_x[:, 1:] + geom.open_y[:-1] + geom.open_y[1:]) * v
+
+    def neg_laplacian(x):
+        fx, fy = potential_faces(x, geom)
+        return ((fx[:, :, 1:] - fx[:, :, :-1]) + (fy[:, 1:, :] - fy[:, :-1, :])) * v
+
+    def dot(a, b):
+        return (a * b).sum((1, 2), keepdim=True)
+
+    inv_deg = torch.where(deg > 0, 1 / deg.clamp(min=1), torch.zeros_like(deg))
+    b = f * v
+    x = torch.zeros_like(b)
+    r = b.clone()
+    z = r * inv_deg
+    d, rz = z, dot(r, z)
+    b_norm = dot(b, b).sqrt()
+    for _ in range(max_iter):
+        if bool((dot(r, r).sqrt() <= tol * b_norm + 1e-30).all()):
+            break
+        ad = neg_laplacian(d)
+        dad = dot(d, ad)
+        alpha = torch.where(dad > 0, rz / dad.clamp(min=1e-30), torch.zeros_like(dad))
+        x = x + alpha * d
+        r = r - alpha * ad
+        z = r * inv_deg
+        rz_new = dot(r, z)
+        beta = torch.where(rz > 0, rz_new / rz.clamp(min=1e-30), torch.zeros_like(rz))
+        d, rz = z + beta * d, rz_new
+    return x
+
+
+def potential_faces(phi: Tensor, geom: Geometry) -> tuple[Tensor, Tensor]:
+    """Face flows down the gradient of a cell potential, closed at the glass: the outflow of
+    each cell is -laplacian(phi)."""
+    pp = F.pad(phi, (1, 1, 1, 1))
+    fx = (pp[:, 1:-1, :-1] - pp[:, 1:-1, 1:]) * geom.open_x
+    fy = (pp[:, :-1, 1:-1] - pp[:, 1:, 1:-1]) * geom.open_y
+    return fx, fy
+
+
+def wax_mass(wax: Tensor, temp: Tensor, p: dict[str, Tensor]) -> Tensor:
+    """Solid-equivalent amount of wax per lamp (B, 1, 1): volume over melted_volume."""
+    return (wax / melted_volume(temp, p)).sum((1, 2), keepdim=True)
+
+
+def expansion_faces(
+    wax: Tensor,
+    temp_before: Tensor,
+    temp_after: Tensor,
+    geom: Geometry,
+    p: dict[str, Tensor],
+    mass: Tensor,
+) -> tuple[Tensor, Tensor]:
+    """The flow that makes room for wax as it melts and solidifies.
+
+    Wax swells (or shrinks) by its volume ratio over the step where it was heated, plus one
+    uniform correction that keeps the lamp's wax_mass at mass. Without it, volume ratchets
+    up: surface tension and compression move wax between cells without its heat, so wax
+    nudged into cooler liquid never shrinks, then grows when conduction warms it. The
+    correction also shrinks wax moved into the cold, as it should.
+
+    The swelling is a source of flow wherever there is wax: advect_with_source turns a
+    source s into s times the wax fraction, so applying the full rate in any cell with wax
+    realizes exactly the wax's own growth. The extra volume pushes out as a potential flow
+    and leaves through the top of the lamp, where the real lamp has an air gap, weighted
+    strongly toward liquid: an outlet in wax drains wax, which the mass correction then
+    regrows everywhere, a runaway that once erased all the wax in one step. Computed without gradients: these flows are slow
+    and smooth.
+    """
+    with torch.no_grad():
+        after = melted_volume(temp_after, p)
+        ratio = after / melted_volume(temp_before, p)
+        # Wax volume after the swelling is wax * (ratio + c); pick c to land on mass.
+        ws = (wax * geom.vessel).sum((1, 2), keepdim=True)
+        c = (mass - (wax * ratio / after).sum((1, 2), keepdim=True)) / (
+            (wax / after).sum((1, 2), keepdim=True) + 1e-12
+        )
+        c = torch.where(ws > 0, c, torch.zeros_like(c))
+        present = (wax > 1e-6).to(wax.dtype)
+        grow = present * (ratio - 1 + c) * geom.vessel
+        outlet = geom.cap * (1 - wax) ** 4 + 1e-6 * geom.cap
+        outlet = outlet / outlet.sum((1, 2), keepdim=True)
+        # A closed vessel has zero net divergence, so all of it leaves through the outlet.
+        source = grow - grow.sum((1, 2), keepdim=True) * outlet
+        return potential_faces(neumann_poisson(source, geom), geom)
+
+
+def advect_with_source(q: Tensor, fx: Tensor, fy: Tensor) -> Tensor:
+    """Advective-form transport, dq/dt + u . grad q = 0, for flows that aren't divergence-free.
+
+    Conservative transport plus q times the divergence: inside wax (q = 1) the outflow of the
+    swelling is replaced exactly, so wax stays solid and its edge moves out. Stays in the range
+    of its inputs while outflow(fx, fy) <= 1.
+    """
+    div = (fx[..., :, 1:] - fx[..., :, :-1]) + (fy[..., 1:, :] - fy[..., :-1, :])
+    if q.dim() == 4:
+        div = div[:, None]
+    return advect(q, fx, fy) + q * div
+
+
+def expand(
+    wax: Tensor,
+    temp: Tensor,
+    hidden: Tensor | None,
+    temp_before: Tensor,
+    geom: Geometry,
+    p: dict[str, Tensor],
+    mass: Tensor,
+) -> tuple[Tensor, Tensor, Tensor | None]:
+    """Swell or shrink wax for its temperature change from temp_before to temp, keeping the
+    lamp's wax_mass at mass, and move wax, temperature and hidden channels with the
+    expansion flow. Interface compression runs with it, as with any flow, so the moving
+    edges stay sharp instead of leaving a film."""
+    fx, fy = expansion_faces(wax, temp_before, temp, geom, p, mass)
+    n = substeps(outflow(fx, fy))
+    fx, fy = fx / n, fy / n
+    for _ in range(n):
+        wax, temp = advect_with_source(wax, fx, fy), advect_with_source(temp, fx, fy)
+        wax = apply_exchange(wax, *compression_faces(wax, geom, fx, fy, p["compress"]))
+        if hidden is not None:
+            hidden = advect_with_source(hidden, fx, fy)
+    return wax, temp, hidden
+
+
 # --- one step -------------------------------------------------------------------------------
 
 
@@ -643,6 +806,10 @@ def advance(
     n = substeps(outflow(fx, fy))
     fx, fy = fx / n, fy / n
     wax, temp, hidden = state.wax, state.temp, state.hidden
+    expanding = float(p["expand"].detach().max()) > 1e-3  # the bounds keep it just above 0
+    mass = state.mass
+    if expanding and mass is None:
+        mass = wax_mass(wax, temp, p).detach()
     for _ in range(n):
         wax, temp = advect(wax, fx, fy), advect(temp, fx, fy)
         wax = apply_exchange(wax, *compression_faces(wax, geom, fx, fy, p["compress"]))
@@ -653,8 +820,11 @@ def advance(
     if exchange_extra is not None:
         wax = apply_exchange(wax, *exchange_faces(wax, geom, *exchange_extra))
 
+    before = temp
     temp = conduct(temp, wax, geom, p, dt)
     temp = heat_exchange(temp, geom, p, dt)
+    if expanding:
+        wax, temp, hidden = expand(wax, temp, hidden, before, geom, p, mass)
     # No clamping: bounds hold by construction, and clamping would break exact conservation.
     flow = None if flow is None else flow.detach()
-    return State(wax=wax, temp=temp, hidden=hidden, flow=flow)
+    return State(wax=wax, temp=temp, hidden=hidden, flow=flow, mass=mass)

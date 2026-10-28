@@ -361,3 +361,62 @@ def test_params_round_trip_defaults():
     vals = _params(mobility=0.2)
     assert abs(float(vals["mobility"]) - 0.2) < 1e-4
     assert abs(float(vals["heat_rate"]) - ph.PARAM_BOUNDS["heat_rate"][2]) < 1e-4
+
+
+def test_params_load_checkpoints_saved_before_a_constant_was_added():
+    old = {k: v[:-1].clone() for k, v in ph.Params(mobility=0.2).state_dict().items()}
+    params = ph.Params()
+    params.load_state_dict(old)
+    vals = params.values()
+    assert abs(float(vals["mobility"]) - 0.2) < 1e-4
+    assert abs(float(vals["expand"]) - ph.PARAM_BOUNDS["expand"][2]) < 1e-3
+
+
+def test_neumann_poisson_flow_has_the_requested_divergence():
+    g = _geom()
+    gen = torch.Generator().manual_seed(12)
+    f = torch.randn(2, H, W, generator=gen, dtype=torch.float64) * g.vessel
+    f = f - f.sum((1, 2), keepdim=True) / g.vessel.sum() * g.vessel
+    fx, fy = ph.potential_faces(ph.neumann_poisson(f, g, tol=1e-10), g)
+    div = (fx[:, :, 1:] - fx[:, :, :-1]) + (fy[:, 1:, :] - fy[:, :-1, :])
+    assert (div - f).abs().max() < 1e-8
+
+
+def test_melting_wax_swells_by_expand_and_stays_bounded():
+    g = _geom()
+    p = _params(expand=0.3)
+    s = _blob_state(g, 0.0, 0.0)
+    cold, hot = torch.zeros_like(s.temp), torch.ones_like(s.temp) * g.vessel
+    wax, temp = s.wax, cold
+    mass = ph.wax_mass(wax, temp, p)
+    # Melt in 100 increments (a real step changes temperature far less).
+    for k in range(1, 101):
+        new = hot * (k / 100)
+        wax, _, _ = ph.expand(wax, new, None, temp, g, p, mass)
+        temp = new
+    ratio = float(wax.sum() / s.wax.sum())
+    assert abs(ratio - 1.3) < 0.02
+    assert wax.min() >= -1e-12 and wax.max() <= 1 + 1e-9
+    assert (wax * (1 - g.vessel)).abs().max() == 0
+    # Cooling back shrinks it to about where it started.
+    for k in range(99, -1, -1):
+        new = hot * (k / 100)
+        wax, _, _ = ph.expand(wax, new, None, temp, g, p, mass)
+        temp = new
+    assert abs(float(wax.sum() / s.wax.sum()) - 1) < 0.02
+
+
+def test_expanding_lamp_keeps_its_wax_mass():
+    # Full physics steps heating cold wax: tension and compression move wax without its heat,
+    # which used to ratchet the volume up; the lamp's wax mass must stay put.
+    g = _geom()
+    p = _params(expand=0.3, mobility=0.2, heat_rate=0.05)
+    s = _blob_state(g, 0.0, 0.0)
+    s.wax = s.wax.clone()
+    s.wax[0, 24:30, 4:12] = 1.0 * g.vessel[24:30, 4:12]
+    start = ph.wax_mass(s.wax, s.temp, p)
+    for _ in range(400):
+        s = ph.step(s, g, p, dt=0.5)
+    assert abs(float(ph.wax_mass(s.wax, s.temp, p) / start) - 1) < 0.01
+    assert float(s.wax.sum() / start) > 1.1  # and it did melt and swell
+    assert s.wax.min() >= -1e-9 and s.wax.max() <= 1 + 1e-9

@@ -57,13 +57,19 @@ def track(masks: np.ndarray, vessel: np.ndarray, fps: float) -> dict[str, np.nda
     """Follow free blobs between consecutive frames by overlap.
 
     Returns vertical velocities of free blobs (lamp heights / s), blob areas (fraction of the
-    vessel), and merge/split event times.
+    vessel), blob shares (fraction of all the wax in that frame), and merge/split event times.
+
+    Blob share compares lamps with different amounts of visible wax: in the footage the wax
+    looks 2-3x larger once melted (the cold slab is thin and half hidden behind the base),
+    which a simulation that conserves wax can't reproduce, but it can split its wax into
+    blobs of the same relative size.
     """
     vessel_area = float(vessel.sum())
-    velocities, areas, merges, splits = [], [], [], []
+    velocities, areas, shares, merges, splits = [], [], [], [], []
     prev_labels, prev_blobs = components(masks[0], vessel)
     for i in range(1, len(masks)):
         labels, blobs = components(masks[i], vessel)
+        wax_px = max(1, int(((masks[i] >= 0.5) & vessel).sum()))
         by_label = {b["label"]: b for b in blobs}
         prev_by_label = {b["label"]: b for b in prev_blobs}
         pairs = np.stack([prev_labels.ravel(), labels.ravel()], 1)
@@ -85,10 +91,12 @@ def track(masks: np.ndarray, vessel: np.ndarray, fps: float) -> dict[str, np.nda
                 if not cur["pool"] and not old["pool"]:
                     velocities.append((cur["height"] - old["height"]) * fps)
                     areas.append(cur["area"] / vessel_area)
+                    shares.append(cur["area"] / wax_px)
         prev_labels, prev_blobs = labels, blobs
     return {
         "velocity": np.array(velocities, np.float32),
         "blob_area": np.array(areas, np.float32),
+        "blob_share": np.array(shares, np.float32),
         "merge_t": np.array(merges, np.float32),
         "split_t": np.array(splits, np.float32),
     }
@@ -168,6 +176,7 @@ def _motion(masks: np.ndarray, vessel: np.ndarray, fps: float, track_fps: float)
         "rise_speed": _quantiles(rising),
         "sink_speed": _quantiles(sinking),
         "blob_area": _quantiles(tr["blob_area"]),
+        "blob_share": _quantiles(tr["blob_share"]),
         "merges_per_min": len(tr["merge_t"]) / minutes if minutes else None,
         "splits_per_min": len(tr["split_t"]) / minutes if minutes else None,
         "brief_merge_fraction": brief / len(mt) if len(mt) else None,

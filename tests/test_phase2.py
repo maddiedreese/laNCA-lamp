@@ -84,6 +84,18 @@ def test_track_measures_rise_speed():
     assert len(tr["merge_t"]) == 0 and len(tr["split_t"]) == 0
 
 
+def test_track_measures_blob_share_of_all_wax():
+    masks, vessel = _blob_frames()
+    tr = measure.track(masks, vessel, fps=10.0)
+    # A 6x6 blob next to a 4x32 pool.
+    np.testing.assert_allclose(tr["blob_share"], 36 / (36 + 128), rtol=1e-6)
+    # Twice the pool (more visible wax), same blob: its share halves-ish, its area doesn't.
+    masks[:, 56:60, :] = 1.0
+    tr2 = measure.track(masks, vessel, fps=10.0)
+    np.testing.assert_allclose(tr2["blob_share"], 36 / (36 + 256), rtol=1e-6)
+    np.testing.assert_allclose(tr2["blob_area"], tr["blob_area"])
+
+
 def test_track_detects_merge():
     masks = np.zeros((2, 64, 32), np.float32)
     masks[0, 10:16, 4:10] = 1

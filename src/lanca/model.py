@@ -190,12 +190,17 @@ class LampNCA(nn.Module):
         """
         waxes = []
         done = 0
+        # Fixed for the whole rollout, so segments don't each re-anchor it.
+        mass = state.mass
+        p = self.physics.values()
+        if mass is None and float(p["expand"].detach()) > 1e-3:
+            mass = ph.wax_mass(state.wax, state.temp, p).detach()
         while done < steps:
             n = min(steps - done, checkpoint_every) if checkpoint_every > 0 else steps - done
             rand = [self.draw_randomness(state, generator) for _ in range(n)]
 
             def segment(wax, temp, hidden, flow, *flat, _n=n):
-                s = ph.State(wax=wax, temp=temp, hidden=hidden, flow=flow)
+                s = ph.State(wax=wax, temp=temp, hidden=hidden, flow=flow, mass=mass)
                 outs = []
                 for i in range(_n):
                     s = self.step(s, geom, dt, flat[2 * i], flat[2 * i + 1], flow_grad)
@@ -209,7 +214,7 @@ class LampNCA(nn.Module):
             else:
                 result = segment(*args)
             wax, temp, hidden, flow, seg = result
-            state = ph.State(wax=wax, temp=temp, hidden=hidden, flow=flow)
+            state = ph.State(wax=wax, temp=temp, hidden=hidden, flow=flow, mass=mass)
             waxes.append(seg)
             done += n
         return state, torch.cat(waxes)

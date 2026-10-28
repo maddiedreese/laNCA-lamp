@@ -175,19 +175,21 @@ uv run python -m lanca.baseline --checkpoint runs/train/stage_b/best.pt --name t
   (`fits/tension.json`).
 
 Results, 2-hour free runs from the cold start (score: stage A's weighted log-error, lower is
-better):
+better; it scores blob size as a share of each lamp's own wax, see below):
 
-| | real | fitted physics, cohesion | tension physics | trained, before the gradient fix | trained, flow gradients, after the fix | trained, size loss |
-|---|---|---|---|---|---|---|
-| score | - | 13.4 | 9.0 | 9.9-10.1 | 17.9 | **7.0** |
-| first blob | 812 s | 487 s | 1126 s | 1421 s | 1152 s | 1779 s |
-| regular cycling from | 2831 s | 1353 s | 2028 s | 1958 s | 1794 s | 2250 s |
-| cycle period | 66 s | 122 s | **78 s** | 159 s | 91 s | 161 s |
-| rise speed (lamp heights/s) | 0.023 | 0.0097 | 0.0071 | 0.0080 | **0.0128** | 0.0122 |
-| sink speed | 0.019 | 0.0089 | 0.0068 | 0.0081 | **0.0158** | 0.0099 |
-| typical blob size | 0.083 | 0.009 | 0.018 | 0.018 | 0.005 | **0.023** |
-| merges per minute | 8.5 | 6.3 | 5.0 | 5.2 | 5.4 | 4.7 |
-| edge per unit wax | 0.13 | 0.46 | 0.32 | 0.32 | 0.31 | **0.30** |
+| | real | fitted physics, cohesion | tension physics | trained, before the gradient fix | trained, flow gradients, after the fix | trained, size loss | refit physics | trained on refit physics |
+|---|---|---|---|---|---|---|---|---|
+| score | - | 7.3 | 5.1 | 5.1-5.9 | 8.6 | 4.0 | 4.7 | **2.5** |
+| score, absolute blob size (older) | - | 13.4 | 9.0 | 9.9-10.1 | 17.9 | **7.0** | - | - |
+| first blob | 812 s | 487 s | 1126 s | 1421 s | 1152 s | 1779 s | 1550 s | 1836 s |
+| regular cycling from | 2831 s | 1353 s | 2028 s | 1958 s | 1794 s | 2250 s | 2043 s | 1966 s |
+| cycle period | 66 s | 122 s | 78 s | 159 s | 91 s | 161 s | 47 s | **54 s** |
+| rise speed (lamp heights/s) | 0.023 | 0.0097 | 0.0071 | 0.0080 | 0.0128 | 0.0122 | 0.0142 | **0.0227** |
+| sink speed | 0.019 | 0.0089 | 0.0068 | 0.0081 | 0.0158 | 0.0099 | **0.0146** | 0.0270 |
+| typical blob size | 0.083 | 0.009 | 0.018 | 0.018 | 0.005 | **0.023** | 0.009 | 0.014 |
+| typical blob share of all wax | 0.28 | 0.076 | 0.15 | 0.12-0.15 | 0.043 | **0.20** | 0.080 | 0.13 |
+| merges per minute | 8.5 | 6.3 | 5.0 | 5.2 | 5.4 | 4.7 | 12.0 | 12.8 |
+| edge per unit wax | 0.13 | 0.46 | 0.32 | 0.32 | 0.31 | **0.30** | 0.39 | 0.38 |
 
 With surface tension the blobs are smooth and solid, the cold pool holds through warm-up, and
 the cycle period is within 20% of the real lamp. Still off: blobs are about 5x too small and
@@ -222,11 +224,42 @@ alone in 2-hour runs (score 7.0 vs 9.0): no haze, no sheet up the wall, the cold
 for half an hour, and blobs are the largest yet (0.023), with wax rising and sinking faster.
 Its cycle is slow (161 s), and wax collects near the top.
 
-**Why blobs are still small.** In the footage the wax's visible area grows as the lamp heats:
-0.12 of the glass in the first 10 minutes, 0.25-0.46 once it cycles (melted wax expands, and
-the cold slab hides behind the base). The simulator conserves the wax it starts with, 0.12,
-so while cycling it has under half the real wax, and equal blob counts mean blobs 2-3x
-smaller. Wax volume that grows with temperature (thermal expansion) is the next fix.
+**Why blobs were still small, and blob share.** In the footage the wax's visible area grows
+as the lamp heats: 0.12 of the glass in the first 10 minutes, 0.25-0.46 once it cycles. A
+simulation that conserves wax keeps 0.12, so equal blob counts meant blobs 2-3x smaller.
+Thermal expansion (`expand`: melted wax takes 1 + expand times the volume) was tried first.
+Matching the footage took expand = 1.5, far beyond paraffin's real 10-20%, and it stalled the
+lamp: the swollen pool sat on the heater for over an hour while the lamp overheated. With a
+realistic 15% it adds little area (0.14 vs 0.125) and its flow stirs wax into fragments (score
+11.0 vs 5.1 without it), so it stays off (expand defaults to 0, capped at 0.3). The extra
+visible area is mostly the view: the cold slab is thin and half hidden behind the base, the
+melted wax is 3D blobs seen side-on.
+
+So blob size is now scored as a share of the lamp's own wax (`blob_share` in `measure.py`):
+each tracked blob's area over all the wax in that frame. The size loss already worked that
+way (shares of wax removed by openings). On it, the size-loss model is best by a wider margin:
+4.0 vs 5.1 for the physics alone, its blobs 0.20 of its wax against 0.28 real. Its remaining
+gaps are the slow cycle (161 s vs 66 s) and rise speed (half the real lamp's).
+
+**Refitting the constants for the cycle.** The size-loss model's cycle was slow (161 s vs
+66 s) and wax rose at half the real speed. The cause was a thermostat: wax ran at almost
+exactly its float temperature, so buoyancy stayed weak and wax hung near the top. Raising
+wall cooling 3x alone helped (score 4.5, period 91 s), but hand-tuning further kept tipping
+the lamp into frozen or overheated states. So stage A was rerun from that point
+(`--init fits/tension.json --set cool_wall=0.0022`), scoring every candidate on blob share
+and averaging two noise seeds per candidate (`--seeds 2`). The best constants
+(`fits/refit.json`) raise the float temperature (0.43 to 0.50) and buoyancy (to 30), with
+stronger heating and cap cooling and wall cooling at 0.0016. Wax now has to heat further
+before it floats, then rises hard.
+
+Alone, this physics cycles fast (47 s) and wax rises and sinks twice as fast as before, but
+blobs stay small (score 4.7 in the 2-hour run; 3.7 in the search, from a run at a different
+thread count, which shows how much one chaotic run can vary). Stage B trained on it, the same
+way as the size-loss model, gives the best lamp so far: score 2.5, cycle period 54 s, rise
+speed matching the real lamp (0.0227 vs 0.0228), large round blobs that pinch off the pool.
+Its gaps: blobs are about half the real share of wax (0.13 vs 0.28), with small fragments
+between them; it merges too often; the first blob comes late (31 vs 14 minutes); and a thin
+sheet of wax runs up the right wall around 30-45 minutes.
 
 ## Footage
 
