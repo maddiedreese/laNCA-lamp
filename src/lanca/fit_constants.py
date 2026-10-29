@@ -38,6 +38,8 @@ SEARCH = [
     "visc_melt",
     "tension",
     "float_temp",
+    "wet",
+    "sink_ratio",
 ]
 LINEAR = {"float_temp"}
 

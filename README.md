@@ -72,11 +72,11 @@ regenerated locally.
 - **Heat**: conduction (different for wax and liquid), a bulb under the base, and cooling
   through the walls and cap. Hot wax rises, cold wax sinks.
 
-The 14 physical constants live in `physics.Params`, bounded and ready to fit in Phase 5.
+The 17 physical constants live in `physics.Params`, bounded and ready to fit in Phase 5.
 
 ```bash
 uv run python -m lanca.baseline --name default            # physics alone, from the real cold start
-uv run python -m lanca.baseline --constants fits/tension.json --name tension
+uv run python -m lanca.baseline --constants fits/refit2.json --name refit2   # best physics
 ```
 
 The baseline writes simulated masks, temperature snapshots, stats and a side-by-side video to
@@ -148,12 +148,13 @@ rollouts, temperature warm-up, behavior statistics, fitting the constants) is Ph
 
 ```bash
 uv run python -m lanca.fit_constants --generations 6 --population 8 --workers 4   # stage A
-uv run python -m lanca.train --stage B --name stage_b --constants fits/tension.json \
-    --temps tension10_fast --flow-grad --curriculum 16 32 64 128 --eval-free 128 --iters 300  # stage B
+uv run python -m lanca.train --stage B --name stage_b --constants fits/refit2.json \
+    --temps refit2 --flow-grad --checkpoint 2 --curriculum 16 32 64 128 --eval-free 128 \
+    --iters 300  # stage B
 uv run python -m lanca.baseline --checkpoint runs/train/stage_b/best.pt --name trained
 ```
 
-- **Stage A** (`fit_constants.py`): derivative-free search (cross-entropy method) over 9
+- **Stage A** (`fit_constants.py`): derivative-free search (cross-entropy method) over 11
   constants, scoring full 2-hour physics runs against the footage's stats. Best constants go
   to `runs/fit/constants.json` (copied to `fits/stage_a.json`). The search's best score was partly luck (each candidate ran
   once, and runs are chaotic); a fresh run showed modest gains (rise speed 0.0078 -> 0.0097,
@@ -260,6 +261,59 @@ speed matching the real lamp (0.0227 vs 0.0228), large round blobs that pinch of
 Its gaps: blobs are about half the real share of wax (0.13 vs 0.28), with small fragments
 between them; it merges too often; the first blob comes late (31 vs 14 minutes); and a thin
 sheet of wax runs up the right wall around 30-45 minutes.
+
+**Wall wetting, sinking and stronger tension.** Three of those gaps came from the physics
+itself; the physics alone shows the same fragments and wall sheets, more of them.
+
+- *Wall sheets.* The sheet wax is cooler than its float temperature, so it is heavier than
+  the liquid, and hardly stiffer than hot wax, yet it stays up: a film one or two cells thick
+  barely moves against the no-slip glass. It favors the right side because that side of the
+  glass leans in more (19 columns over the lamp's height vs 11), so rising blobs run into it.
+  In a real lamp the liquid wets the glass and wax never touches it. `wet` adds that: extra
+  chemical potential in cells against the side glass (not the floor), so surface tension
+  moves wax off it. At wet = 0.5 the share of wax within 2 cells of the glass falls from
+  4-11% to 1-1.4% (real: 1-2%), and the physics alone scores 2.6 instead of 4.7.
+- *Sinking.* `sink_ratio` scales the buoyancy of wax colder than its float temperature. At
+  0.6 it slows sinking only a little (0.026 vs 0.029); the search kept it near 1.
+- *Warm-up.* A separate melting temperature was considered, but in this physics nothing
+  else is tied to melting: buoyancy and stiffness both follow float_temp. The pool passes its
+  float temperature within 9-15 minutes but rises as one neutral slab. Making cold wax stiffer
+  (visc_melt 1.2 to 6) moved the first blob by about a minute; faster heating moves it most
+  but starts cycling at 14 minutes instead of 47.
+- *Tension.* The refit raised buoyancy 5x but kept surface tension, so rising wax stretched
+  into necks that snapped into fragments, which then merged back (13 merges/min vs 8.5).
+  With wet = 0.5, tension 40 scores 2.1: 2 free blobs (real 2), 9.2 merges/min, edge per unit
+  wax 0.30. Tension 80 overshoots (blobs 0.53 of the wax, 2 merges/min). Explicit tension
+  substeps scale with it, so a 2-hour run takes ~50 minutes at 40 instead of 20.
+
+Stage A from there (`--init fits/refit.json --set wet=0.5 tension=40`, 3 generations of 5,
+2 seeds each, now also searching wet and sink_ratio) gives `fits/refit2.json`: tension 37,
+wet 0.37, sink_ratio 0.97, float temperature 0.49. It is the best lamp so far, and it is the
+physics alone: 1.3 and 0.7 on two seeds (search: 1.0 and 0.95).
+
+| | real | refit physics | trained on refit physics | refit2 physics (2 seeds) | trained on refit2 physics (2 seeds) |
+|---|---|---|---|---|---|
+| score | - | 4.7 | 2.5 | **1.3, 0.7** | 1.6, 1.2 |
+| first blob | 812 s | 1550 s | 1836 s | 1892 s, **1192 s** | 2221 s, 1614 s |
+| regular cycling from | 2831 s | 2043 s | 1966 s | 2074 s, 2070 s | **2596 s**, 2132 s |
+| cycle period | 66 s | 47 s | 54 s | 50 s, 52 s | 54 s, 51 s |
+| rise speed | 0.023 | 0.014 | **0.023** | 0.026, 0.025 | 0.029, 0.028 |
+| sink speed | 0.019 | 0.015 | 0.027 | 0.027, 0.026 | 0.026, **0.023** |
+| free blobs | 2 | 5 | 4 | **2, 2** | **2, 2** |
+| blob share of all wax | 0.28 | 0.08 | 0.13 | 0.21, 0.21 | 0.38, 0.40 |
+| merges per minute | 8.5 | 12.0 | 12.8 | 7.6, **9.4** | 5.6, 5.8 |
+| edge per unit wax | 0.13 | 0.39 | 0.38 | 0.30, 0.30 | **0.29, 0.29** |
+
+Stage B on refit2 lowers held-out behavior error on 64 s windows (0.37 to 0.29), but its
+2-hour runs are no better than the physics alone: it overshoots blob size (0.38-0.40 of the
+wax vs 0.28 real, with too few merges) and delays the first blob. Training also ran the GPU
+out of memory once windows reached 64 steps: the faster flow and stronger tension mean more
+substeps per step, so each 8-step gradient checkpoint segment held more. Segments of 2 steps
+(`--checkpoint 2`) fixed it at no extra compute, since every step is recomputed once either way.
+
+Still off in the best lamp: the first blob comes late (20-32 vs 14 minutes), wax sinks about
+35% too fast and sits a little high (median height 0.55 vs 0.46), and blobs are 0.21 of the
+wax vs 0.28.
 
 ## Footage
 

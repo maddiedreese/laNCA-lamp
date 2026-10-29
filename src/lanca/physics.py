@@ -73,6 +73,9 @@ class Geometry:
         # Cooling: cells touching the side walls, and the top rows under the cap.
         neighbors = pad[:-2, 1:-1] * pad[2:, 1:-1] * pad[1:-1, :-2] * pad[1:-1, 2:]
         self.wall = (1 - neighbors) * v
+        # Cells with glass to the left or right (every row's end cells, steps included, but not
+        # the floor or cap): where wall wetting acts.
+        self.side = (1 - pad[1:-1, :-2] * pad[1:-1, 2:]) * v
         self.cap = torch.exp(-(r - self.top).clamp(min=0) / top_rows) * v
 
         # Dirichlet Poisson solver on the interior corners, by sine transform.
@@ -168,7 +171,7 @@ PARAM_BOUNDS = {
     "buoy_wax": (0.0, 50.0, 6.0),  # buoyancy of wax per unit (T - float_temp)
     "buoy_liquid": (0.0, 50.0, 0.5),  # thermal buoyancy of the liquid
     "mobility": (0.0, 20.0, 4.0),  # Stokes flow per unit buoyancy (1 / liquid viscosity)
-    "tension": (0.0, 20.0, 1.0),  # surface tension: exchange rate per unit potential difference
+    "tension": (0.0, 100.0, 1.0),  # surface tension: exchange rate per unit potential difference
     "interface": (0.5, 3.0, 1.0),  # interface width in cells (Cahn-Hilliard epsilon)
     "visc_wax": (1.0, 1000.0, 100.0),  # wax viscosity / liquid viscosity at float_temp
     "visc_melt": (0.0, 10.0, 3.0),  # wax stiffens by exp(visc_melt) per unit drop in T
@@ -177,6 +180,13 @@ PARAM_BOUNDS = {
     # melting; the footage's wax looks 2-3x larger once melted, but that is mostly the view
     # (see measure.track), and matching it physically stalled the lamp.
     "expand": (0.0, 0.3, 0.0),
+    # Wall wetting: extra chemical potential for wax in cells touching the glass. In a real lamp
+    # the liquid wets the glass and wax never touches it; without this, wax that brushes the
+    # glass stays there as a thin film, held still by the no-slip wall.
+    "wet": (0.0, 2.0, 0.0),
+    # Buoyancy of wax colder than float_temp, as a fraction of buoy_wax: wax that has cooled
+    # past neutral sinks this much more gently than hot wax rises.
+    "sink_ratio": (0.05, 2.0, 1.0),
 }
 
 MAX_VISCOSITY = 1e4
@@ -411,7 +421,9 @@ def buoyancy(state: State, geom: Geometry, p: dict[str, Tensor]) -> Tensor:
     wax, temp = state.wax, state.temp
     v = geom.vessel
     mean_t = (temp * v).sum((1, 2), keepdim=True) / v.sum()
-    b_wax = p["buoy_wax"] * wax * (temp - p["float_temp"])
+    excess = temp - p["float_temp"]
+    excess = torch.where(excess < 0, excess * p["sink_ratio"], excess)
+    b_wax = p["buoy_wax"] * wax * excess
     b_liq = p["buoy_liquid"] * (1 - wax) * (temp - mean_t)
     return (b_wax + b_liq) * v
 
@@ -449,13 +461,16 @@ def substeps(rate_per_cell: Tensor, limit: float = 0.9) -> int:
     return max(1, math.ceil(float(rate_per_cell.detach().max()) / limit))
 
 
-def chemical_potential(wax: Tensor, geom: Geometry, width: Tensor | float) -> Tensor:
+def chemical_potential(
+    wax: Tensor, geom: Geometry, width: Tensor | float, wet: Tensor | float = 0.0
+) -> Tensor:
     """Cahn-Hilliard chemical potential (B, H, W) of the wax field.
 
     mu = f'(w) - width^2 * laplacian(w), with the double well f(w) = w^2 (1 - w)^2. The first
     term pushes cells toward pure wax or pure liquid; the second is high on convex bumps and
     low in dents, so wax flowing down mu shortens the interface. Neighbors across the glass
-    count as the cell itself (no flux through walls).
+    count as the cell itself (no flux through walls). wet adds a constant in cells against
+    the side glass, so wax there flows inward and the glass stays wetted by liquid.
     """
     wp = F.pad(wax, (1, 1, 1, 1))
     lap = (
@@ -464,11 +479,15 @@ def chemical_potential(wax: Tensor, geom: Geometry, width: Tensor | float) -> Te
         + (wp[:, :-2, 1:-1] - wax) * geom.open_y[:-1]
         + (wp[:, 2:, 1:-1] - wax) * geom.open_y[1:]
     )
-    return 2 * wax * (1 - wax) * (1 - 2 * wax) - width**2 * lap
+    return 2 * wax * (1 - wax) * (1 - 2 * wax) - width**2 * lap + wet * geom.side
 
 
 def tension_faces(
-    wax: Tensor, geom: Geometry, rate: Tensor | float, width: Tensor | float
+    wax: Tensor,
+    geom: Geometry,
+    rate: Tensor | float,
+    width: Tensor | float,
+    wet: Tensor | float = 0.0,
 ) -> tuple[Tensor, Tensor]:
     """Surface tension as wax/liquid exchange down the chemical potential.
 
@@ -478,7 +497,7 @@ def tension_faces(
     so motion concentrates along interfaces (surface diffusion), wax is conserved exactly, and
     it stays in [0, 1].
     """
-    mp = F.pad(chemical_potential(wax, geom, width), (1, 1, 1, 1))
+    mp = F.pad(chemical_potential(wax, geom, width, wet), (1, 1, 1, 1))
     sx = rate * (mp[:, 1:-1, :-1] - mp[:, 1:-1, 1:])  # positive moves wax right
     sy = rate * (mp[:, :-1, 1:-1] - mp[:, 1:, 1:-1])  # positive moves wax down
     return exchange_faces(wax, geom, sx, sy)
@@ -512,19 +531,19 @@ def apply_tension(
     stiffness = float((p["tension"].detach() * dt * (64 * width**2 + 2)).max())
     n = max(1, math.ceil(stiffness))
 
-    def relax(w: Tensor, tension: Tensor, width: Tensor, steps: int) -> Tensor:
+    def relax(w: Tensor, tension: Tensor, width: Tensor, wet: Tensor, steps: int) -> Tensor:
         rate = tension * dt / n
         for _ in range(steps):
-            w = apply_exchange(w, *tension_faces(w, geom, rate, width))
+            w = apply_exchange(w, *tension_faces(w, geom, rate, width, wet))
         return w
 
     if grad or not torch.is_grad_enabled():
-        return relax(wax, p["tension"], p["interface"], n)
+        return relax(wax, p["tension"], p["interface"], p["wet"], n)
     k = min(grad_substeps, n)
     with torch.no_grad():
-        early = relax(wax, p["tension"].detach(), width, n - k)
+        early = relax(wax, p["tension"].detach(), width, p["wet"].detach(), n - k)
     early = wax + (early - wax).detach()
-    return relax(early, p["tension"], p["interface"], k)
+    return relax(early, p["tension"], p["interface"], p["wet"], k)
 
 
 def compression_faces(

@@ -420,3 +420,38 @@ def test_expanding_lamp_keeps_its_wax_mass():
     assert abs(float(ph.wax_mass(s.wax, s.temp, p) / start) - 1) < 0.01
     assert float(s.wax.sum() / start) > 1.1  # and it did melt and swell
     assert s.wax.min() >= -1e-9 and s.wax.max() <= 1 + 1e-9
+
+
+def test_wetting_pulls_a_film_off_the_side_glass_but_not_the_floor():
+    g = _geom()
+    left = torch.stack([torch.nonzero(r)[0, 0] for r in g.vessel[1:-1].bool()])
+    film = torch.zeros(1, H, W, dtype=torch.float64)
+    for i, c in enumerate(left.tolist()):
+        if 4 <= i < 20:
+            film[0, i + 1, c : c + 2] = 1.0  # two cells thick against the left glass
+    film[0, H - 4 : H - 1] = 1.0  # and a pool on the floor
+    film = film * g.vessel
+    out = {}
+    for wet in (0.0, 0.5):
+        p = _params(tension=10.0, wet=wet)
+        wax = film
+        for _ in range(20):
+            wax = ph.apply_tension(wax, g, p, 0.5)
+        assert abs(float(wax.sum() - film.sum())) < 1e-9
+        out[wet] = wax
+    on_glass = lambda w: float((w * g.side)[0, : H - 2].sum())
+    assert on_glass(out[0.5]) < 0.1 * on_glass(out[0.0])
+    floor = lambda w: float((w * (1 - g.side))[0, H - 2].sum())  # on the floor, off the glass
+    assert floor(out[0.5]) > 0.9 * floor(out[0.0])
+
+
+def test_sink_ratio_scales_only_cold_wax_buoyancy():
+    g = _geom()
+    wax = g.vessel[None].double()
+    temp = torch.full_like(wax, 0.3) * g.vessel
+    temp[:, : H // 2] = 0.6 * g.vessel[: H // 2]  # hot above, cold below; float_temp is 0.45
+    full = ph.buoyancy(ph.State(wax=wax, temp=temp), g, _params(buoy_liquid=0.0, sink_ratio=1.0))
+    half = ph.buoyancy(ph.State(wax=wax, temp=temp), g, _params(buoy_liquid=0.0, sink_ratio=0.5))
+    hot, cold = temp > 0.45, (temp < 0.45) & g.vessel.bool()
+    assert torch.allclose(half[hot], full[hot])
+    assert torch.allclose(half[cold], 0.5 * full[cold], rtol=1e-3)
