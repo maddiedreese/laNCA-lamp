@@ -284,6 +284,7 @@ def main() -> None:
                 best = score
                 torch.save(trainer.model.state_dict(), out / "best.pt")
             torch.save(trainer.model.state_dict(), out / "last.pt")
+            torch.save(trainer.model.state_dict(), out / f"iter{it}.pt")
             consts = {k: round(float(v), 5) for k, v in trainer.model.physics.values().items()}
             print(
                 f"iter {it:4d} free {row['free']:2d} | train {row['loss']:.4f} (frame {row['frame']:.4f}) | "

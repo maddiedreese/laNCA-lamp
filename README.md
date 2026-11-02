@@ -72,11 +72,11 @@ regenerated locally.
 - **Heat**: conduction (different for wax and liquid), a bulb under the base, and cooling
   through the walls and cap. Hot wax rises, cold wax sinks.
 
-The 17 physical constants live in `physics.Params`, bounded and ready to fit in Phase 5.
+The 19 physical constants live in `physics.Params`, bounded and ready to fit in Phase 5.
 
 ```bash
 uv run python -m lanca.baseline --name default            # physics alone, from the real cold start
-uv run python -m lanca.baseline --constants fits/refit2.json --name refit2   # best physics
+uv run python -m lanca.baseline --constants fits/refit3.json --name refit3   # best physics
 ```
 
 The baseline writes simulated masks, temperature snapshots, stats and a side-by-side video to
@@ -148,13 +148,13 @@ rollouts, temperature warm-up, behavior statistics, fitting the constants) is Ph
 
 ```bash
 uv run python -m lanca.fit_constants --generations 6 --population 8 --workers 4   # stage A
-uv run python -m lanca.train --stage B --name stage_b --constants fits/refit2.json \
-    --temps refit2 --flow-grad --checkpoint 2 --curriculum 16 32 64 128 --eval-free 128 \
+uv run python -m lanca.train --stage B --name stage_b --constants fits/refit3.json \
+    --temps refit3 --flow-grad --checkpoint 2 --curriculum 16 32 64 128 --eval-free 128 \
     --iters 300  # stage B
 uv run python -m lanca.baseline --checkpoint runs/train/stage_b/best.pt --name trained
 ```
 
-- **Stage A** (`fit_constants.py`): derivative-free search (cross-entropy method) over 11
+- **Stage A** (`fit_constants.py`): derivative-free search (cross-entropy method) over 14
   constants, scoring full 2-hour physics runs against the footage's stats. Best constants go
   to `runs/fit/constants.json` (copied to `fits/stage_a.json`). The search's best score was partly luck (each candidate ran
   once, and runs are chaotic); a fresh run showed modest gains (rise speed 0.0078 -> 0.0097,
@@ -311,9 +311,57 @@ out of memory once windows reached 64 steps: the faster flow and stronger tensio
 substeps per step, so each 8-step gradient checkpoint segment held more. Segments of 2 steps
 (`--checkpoint 2`) fixed it at no extra compute, since every step is recomputed once either way.
 
-Still off in the best lamp: the first blob comes late (20-32 vs 14 minutes), wax sinks about
+Still off in that lamp: the first blob comes late (20-32 vs 14 minutes), wax sinks about
 35% too fast and sits a little high (median height 0.55 vs 0.46), and blobs are 0.21 of the
 wax vs 0.28.
+
+**Heater shape and liquid buoyancy.** Diagnostics first:
+
+- *First blob.* The real lamp's first blob is the top of a tall plume on the left (height
+  0.62), the physics' first blobs come off low on the right. Over the rest of the run, though,
+  real wax rises evenly across the width (by quarter of the width, L to R: 0.09, 0.15, 0.16,
+  0.09 of the rising wax), as the physics does, so the heater stays centred.
+- *Height.* Free blobs sit at the right height (median 0.76 real vs 0.74-0.75). What is off is
+  the pool: 39% of the real lamp's wax stays in it from 50 minutes on, 16% in the physics, and
+  more of the physics' wax hangs under the cap.
+- *Liquid buoyancy* (`buoy_liquid` 0, 0.25, 1) mostly moves the first blob (905, 1404, 2045 s);
+  sinking stays fast at all three, and the scores (1.9, 0.9, 1.3) are within seed noise.
+
+The heater footprint is now two constants, `heat_width` (Gaussian width across the floor, in
+half-widths, default 0.6) and `heat_depth` (exponential depth up from it, in cells, default 5),
+at fixed total power, so they move heat around without adding any; the defaults reproduce the
+old heater exactly. Stage A from refit2 with these and `buoy_liquid` added (14 constants,
+3 generations of 5, 3 seeds per candidate, 10 hours) gives `fits/refit3.json`: a narrower
+heater (0.46), gentler sinking (sink_ratio 0.71), float temperature 0.46, buoy_liquid 0.62,
+stiffer cold wax (visc_melt 1.95). Search score 0.64 (seeds 0.50, 0.59, 0.84).
+
+| | real | refit2 physics (2 seeds) | refit3 physics (3 seeds) | trained on refit3, iteration 200 (2 seeds) |
+|---|---|---|---|---|
+| score | - | 1.3, 0.7 | **0.50**, 7.3, **0.70** | 1.5, 0.9 |
+| first blob | 812 s | 1892 s, 1192 s | **888 s**, 1036 s, 1082 s | 2252 s, 1742 s |
+| regular cycling from | 2831 s | 2074 s, 2070 s | 1639 s, 3913 s, 1458 s | 2505 s, 2284 s |
+| cycle period | 66 s | 50 s, 52 s | **62 s**, 243 s, **67 s** | 50 s, 53 s |
+| rise speed | 0.023 | 0.026, 0.025 | 0.019, **0.022**, **0.022** | 0.029, 0.028 |
+| sink speed | 0.019 | 0.027, 0.026 | **0.020**, 0.021, **0.019** | 0.026, 0.024 |
+| free blobs | 2 | **2, 2** | **2**, 6, **2** | **2, 2** |
+| blob share of all wax | 0.28 | 0.21, 0.21 | **0.27**, 0.08, **0.31** | 0.24, 0.26 |
+| merges per minute | 8.5 | 7.6, 9.4 | 6.1, 21, 5.6 | 7.5, 7.4 |
+| wax height | 0.46 | 0.54, 0.56 | 0.61, 0.64, 0.62 | 0.55, 0.57 |
+
+On two of three seeds refit3 is the best lamp yet: the first blob at 15-18 minutes, the
+cycle period, sinking and blob share all within about 10% of the real lamp. The third seed
+breaks into fragments (6 free blobs, 21 merges/min) and cycles every 4 minutes, so these
+constants sit near a tipping point. Wax also sits higher than before (0.61-0.64 vs 0.46): only
+7% of the wax is in the bottom eighth of the lamp, against 30% real.
+
+Stage B on refit3 (from the refit2 network, `--checkpoint 2`, 200 iterations) saves a
+checkpoint at every evaluation (`iter<N>.pt`), and each was scored on two 2-hour runs instead
+of trusting held-out error: iterations 50, 100, 150 and 200 average 1.30, 1.32, 1.25 and 1.23
+(best single run 0.94 at 200). All are worse than the physics alone: the network brings back a
+late first blob (29-38 minutes), fast sinking and a short cycle (about 52 s).
+
+Still off in the best lamp: one seed in three fragments, wax sits high with too little left in
+the pool (median height 0.61 vs 0.46), and regular cycling starts early (24-27 vs 47 minutes).
 
 ## Footage
 

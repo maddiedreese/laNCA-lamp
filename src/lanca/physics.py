@@ -65,10 +65,12 @@ class Geometry:
         cols = torch.arange(w, dtype=v.dtype, device=v.device)
         bottom_cols = torch.nonzero(v[self.bottom]).squeeze(1).to(v.dtype)
         center, half = bottom_cols.mean(), (bottom_cols.max() - bottom_cols.min() + 1) / 2
-        across = torch.exp(-0.5 * ((cols - center) / (0.6 * half)) ** 2)
-        up = torch.exp(-(self.bottom - r).clamp(min=0) / heater_rows)
-        self.heater = up * across[None, :] * v
-        self.heater = self.heater / self.heater.max()
+        # Kept as distances so heater() can reshape the footprint from heat_width and heat_depth.
+        self.heat_across = ((cols - center) / half)[None, :].expand(h, w) * v
+        self.heat_up = (self.bottom - r).clamp(min=0) * v
+        self.heater = heater_shape(self, 0.6, float(heater_rows))
+        # Total bulb power of the default footprint; heater() keeps every footprint at this.
+        self.heater_power = self.heater.sum()
 
         # Cooling: cells touching the side walls, and the top rows under the cap.
         neighbors = pad[:-2, 1:-1] * pad[2:, 1:-1] * pad[1:-1, :-2] * pad[1:-1, 2:]
@@ -187,6 +189,10 @@ PARAM_BOUNDS = {
     # Buoyancy of wax colder than float_temp, as a fraction of buoy_wax: wax that has cooled
     # past neutral sinks this much more gently than hot wax rises.
     "sink_ratio": (0.05, 2.0, 1.0),
+    # Heater footprint at fixed total power: Gaussian width across the floor (in half-widths)
+    # and exponential depth up from it (in cells).
+    "heat_width": (0.1, 2.0, 0.6),
+    "heat_depth": (1.0, 30.0, 5.0),
 }
 
 MAX_VISCOSITY = 1e4
@@ -616,9 +622,23 @@ def conduct(temp: Tensor, wax: Tensor, geom: Geometry, p: dict[str, Tensor], dt:
     return temp
 
 
+def heater_shape(geom: Geometry, width, depth) -> Tensor:
+    """Bulb footprint: Gaussian across (width in half-widths of the floor), exponential up
+    (depth in cells), peaking at 1."""
+    shape = torch.exp(-0.5 * (geom.heat_across / width) ** 2 - geom.heat_up / depth) * geom.vessel
+    return shape / shape.max()
+
+
+def heater(geom: Geometry, p: dict[str, Tensor]) -> Tensor:
+    """Heater footprint for p, scaled to the default footprint's total power, so heat_width
+    and heat_depth move the heat around without adding or removing any."""
+    shape = heater_shape(geom, p["heat_width"], p["heat_depth"])
+    return shape * (geom.heater_power / shape.sum())
+
+
 def heat_exchange(temp: Tensor, geom: Geometry, p: dict[str, Tensor], dt: float) -> Tensor:
     """Bulb heating toward T = 1 and cooling toward T = 0, integrated exactly per cell."""
-    heat = p["heat_rate"] * geom.heater
+    heat = p["heat_rate"] * heater(geom, p)
     cool = p["cool_wall"] * geom.wall + p["cool_cap"] * geom.cap
     rate = heat + cool
     target = torch.where(rate > 0, heat / rate.clamp(min=1e-12), torch.zeros_like(rate))

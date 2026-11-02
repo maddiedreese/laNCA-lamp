@@ -40,6 +40,9 @@ SEARCH = [
     "float_temp",
     "wet",
     "sink_ratio",
+    "buoy_liquid",
+    "heat_width",
+    "heat_depth",
 ]
 LINEAR = {"float_temp"}
 

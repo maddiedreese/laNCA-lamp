@@ -455,3 +455,14 @@ def test_sink_ratio_scales_only_cold_wax_buoyancy():
     hot, cold = temp > 0.45, (temp < 0.45) & g.vessel.bool()
     assert torch.allclose(half[hot], full[hot])
     assert torch.allclose(half[cold], 0.5 * full[cold], rtol=1e-3)
+
+
+def test_heater_defaults_match_geometry_and_keep_total_power():
+    g = _geom()
+    p = _params()
+    assert torch.allclose(ph.heater(g, p), g.heater.to(ph.heater(g, p)), atol=1e-6)
+    narrow = ph.heater(g, _params(heat_width=0.2, heat_depth=2.0))
+    assert torch.allclose(narrow.sum(), g.heater.sum().to(narrow), rtol=1e-5)
+    # Narrower and shallower: more of the power in the middle of the floor.
+    mid = g.shape[1] // 2
+    assert narrow[g.bottom, mid] > g.heater[g.bottom, mid]
