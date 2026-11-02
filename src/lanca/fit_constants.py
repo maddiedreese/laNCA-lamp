@@ -12,7 +12,8 @@ from the footage's. The best constants go to runs/fit/constants.json for stages 
 (runs/fit/<name>/constants.json with --name).
 
 Runs are chaotic, so one run per candidate rewards luck; --seeds averages each candidate's
-score over several noise seeds. --init starts the search from a constants file (constants
+score over several noise seeds, and --worst mixes in the worst seed, so constants that only
+work on average (some seeds fall apart) rank lower. --init starts the search from a constants file (constants
 not searched are kept fixed at its values) instead of the defaults.
 """
 
@@ -43,6 +44,7 @@ SEARCH = [
     "buoy_liquid",
     "heat_width",
     "heat_depth",
+    "cap_depth",
 ]
 LINEAR = {"float_temp"}
 
@@ -58,7 +60,23 @@ TARGETS = [
     ("free_blobs", 0.5, lambda s: s["cycling"]["free_blobs"]["p50"] + 1),
     ("height", 1.0, lambda s: s["cycling"]["height"]["p50"]),
     ("merges", 0.5, lambda s: s["cycling"]["merges_per_min"] + 0.5),
+    # The real lamp is still warming through the whole recording: its wax climbs from the pool
+    # over the second hour. The overall height median barely sees that, so also compare it at
+    # fixed lamp ages.
+    ("height_60m", 1.0, lambda s: height_at(s, 3600.0)),
+    ("height_90m", 1.0, lambda s: height_at(s, 5400.0)),
 ]
+def height_at(stats: dict, t: float) -> float | None:
+    """Median wax height over the 10 minutes of the clip holding t."""
+    if "height_by_age" in stats:
+        ages = stats["height_by_age"]
+        return ages[int(t // 600)] if int(t // 600) < len(ages) else None
+    for w in stats["windows"]:  # older stats: windows from the start of cycling
+        if w["start_s"] <= t < w["end_s"]:
+            return w["height"]["p50"]
+    return None
+
+
 MISSING = 4.0  # penalty when a stat doesn't exist at all (e.g. the lamp never starts cycling)
 
 
@@ -97,15 +115,19 @@ def evaluate(args: tuple[dict, int, float]) -> dict:
     return {"constants": overrides, "score": total, "parts": parts, "seconds": time.time() - start}
 
 
-def average(results: list[dict]) -> dict:
-    """One candidate's runs over several seeds: mean score and parts."""
+def average(results: list[dict], worst: float = 0.0) -> dict:
+    """One candidate's runs over several seeds: mean parts, and a score that mixes the mean
+    with the worst seed (worst = 0: mean, 1: worst seed only)."""
     parts = {
         k: float(np.mean([r["parts"].get(k, MISSING) for r in results]))
         for k in results[0]["parts"]
     }
     return {
         "constants": results[0]["constants"],
-        "score": float(np.mean([r["score"] for r in results])),
+        "score": float(
+            (1 - worst) * np.mean([r["score"] for r in results])
+            + worst * max(r["score"] for r in results)
+        ),
         "seed_scores": [r["score"] for r in results],
         "parts": parts,
         "seconds": float(sum(r["seconds"] for r in results)),
@@ -139,6 +161,9 @@ def main() -> None:
     ap.add_argument("--minutes", type=float, default=120.0)
     ap.add_argument("--sigma", type=float, default=0.5, help="initial spread (log space)")
     ap.add_argument("--seeds", type=int, default=1, help="noise seeds per candidate")
+    ap.add_argument(
+        "--worst", type=float, default=0.0, help="weight of the worst seed in a candidate's score"
+    )
     ap.add_argument("--init", type=Path, default=None, help="constants file to start from")
     ap.add_argument(
         "--set", nargs="*", default=[], metavar="NAME=VALUE", help="override starting constants"
@@ -175,7 +200,7 @@ def main() -> None:
             ]
             runs = list(pool.map(evaluate, jobs))
             results = [
-                average(runs[i * args.seeds : (i + 1) * args.seeds]) for i in range(len(candidates))
+                average(runs[i * args.seeds : (i + 1) * args.seeds], args.worst) for i in range(len(candidates))
             ]
             for r in results:
                 r["generation"] = gen

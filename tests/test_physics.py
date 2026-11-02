@@ -466,3 +466,12 @@ def test_heater_defaults_match_geometry_and_keep_total_power():
     # Narrower and shallower: more of the power in the middle of the floor.
     mid = g.shape[1] // 2
     assert narrow[g.bottom, mid] > g.heater[g.bottom, mid]
+
+
+def test_cap_depth_keeps_total_cap_cooling():
+    g = _geom()
+    default = ph.cap_cooling(g, _params())
+    assert torch.allclose(default, g.cap.to(default), atol=1e-6)
+    deep = ph.cap_cooling(g, _params(cap_depth=20.0))
+    assert torch.allclose(deep.sum(), default.sum(), rtol=1e-5)
+    assert deep[g.top].sum() < default[g.top].sum()  # spread further down, less at the very top

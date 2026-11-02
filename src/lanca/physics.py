@@ -78,7 +78,10 @@ class Geometry:
         # Cells with glass to the left or right (every row's end cells, steps included, but not
         # the floor or cap): where wall wetting acts.
         self.side = (1 - pad[1:-1, :-2] * pad[1:-1, 2:]) * v
-        self.cap = torch.exp(-(r - self.top).clamp(min=0) / top_rows) * v
+        self.cap_dist = (r - self.top).clamp(min=0) * v
+        self.cap = torch.exp(-self.cap_dist / top_rows) * v
+        # Total cap cooling of the default zone; cap_cooling() keeps every depth at this.
+        self.cap_power = self.cap.sum()
 
         # Dirichlet Poisson solver on the interior corners, by sine transform.
         n, m = h - 1, w - 1
@@ -193,6 +196,8 @@ PARAM_BOUNDS = {
     # and exponential depth up from it (in cells).
     "heat_width": (0.1, 2.0, 0.6),
     "heat_depth": (1.0, 30.0, 5.0),
+    # Depth of the cooling zone under the cap (cells), at fixed total cap cooling.
+    "cap_depth": (1.0, 30.0, 6.0),
 }
 
 MAX_VISCOSITY = 1e4
@@ -636,10 +641,16 @@ def heater(geom: Geometry, p: dict[str, Tensor]) -> Tensor:
     return shape * (geom.heater_power / shape.sum())
 
 
+def cap_cooling(geom: Geometry, p: dict[str, Tensor]) -> Tensor:
+    """Cooling zone under the cap, cap_depth cells deep, at the default zone's total cooling."""
+    shape = torch.exp(-geom.cap_dist / p["cap_depth"]) * geom.vessel
+    return shape * (geom.cap_power / shape.sum())
+
+
 def heat_exchange(temp: Tensor, geom: Geometry, p: dict[str, Tensor], dt: float) -> Tensor:
     """Bulb heating toward T = 1 and cooling toward T = 0, integrated exactly per cell."""
     heat = p["heat_rate"] * heater(geom, p)
-    cool = p["cool_wall"] * geom.wall + p["cool_cap"] * geom.cap
+    cool = p["cool_wall"] * geom.wall + p["cool_cap"] * cap_cooling(geom, p)
     rate = heat + cool
     target = torch.where(rate > 0, heat / rate.clamp(min=1e-12), torch.zeros_like(rate))
     return (target + (temp - target) * torch.exp(-rate * dt)) * geom.vessel

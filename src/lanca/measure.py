@@ -183,6 +183,14 @@ def _motion(masks: np.ndarray, vessel: np.ndarray, fps: float, track_fps: float)
     }
 
 
+def height_by_age(series: dict[str, np.ndarray], fps: float, window_s: float = 600.0) -> list:
+    """Median wax height in fixed windows from the start of the clip (not of cycling), to
+    follow the slow warm-up whenever cycling starts."""
+    win = max(1, int(window_s * fps))
+    h = series["height"]
+    return [round(float(np.median(h[a : a + win])), 4) for a in range(0, len(h) - win // 2, win)]
+
+
 def summarize(
     masks: np.ndarray,
     vessel: np.ndarray,
@@ -223,6 +231,7 @@ def summarize(
         "fps": fps,
         "duration_s": len(masks) / fps,
         "phases": ph,
+        "height_by_age": height_by_age(series, fps, window_s),
         "cycling": block(s, len(masks)),
         "windows": windows,
     }, series
