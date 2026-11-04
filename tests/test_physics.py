@@ -475,3 +475,36 @@ def test_cap_depth_keeps_total_cap_cooling():
     deep = ph.cap_cooling(g, _params(cap_depth=20.0))
     assert torch.allclose(deep.sum(), default.sum(), rtol=1e-5)
     assert deep[g.top].sum() < default[g.top].sum()  # spread further down, less at the very top
+
+
+def test_latent_heat_slows_melting_and_conserves_energy():
+    p = _params(latent=1.0)
+    wax = torch.tensor([[[1.0, 0.5, 0.0]]], dtype=torch.float64)
+    ft = float(p["float_temp"])
+    before = torch.full_like(wax, ft - 0.1)
+    after = before + 0.1
+    t = ph.absorb_latent(before, after, wax, p)
+
+    def energy(x):
+        return x + p["latent"] * wax * ph.melted_share(x, p)
+
+    assert torch.allclose(energy(t) - energy(before), after - before, atol=1e-9)
+    assert t[0, 0, 0] < t[0, 0, 1] < t[0, 0, 2] == after[0, 0, 2]  # more wax, slower warming
+    assert ((t >= before) & (t <= after)).all()
+    # No latent heat: unchanged.
+    assert torch.equal(ph.absorb_latent(before, after, wax, _params()), after)
+
+
+def test_latent_heat_is_conserved_while_wax_moves():
+    # No heater or cooling to speak of: a step only moves wax and heat around, so total
+    # energy (sensible plus latent) must stay put even as tension moves wax on its own.
+    g = _geom()
+    p = _params(latent=1.0, heat_rate=1e-4, cool_wall=1e-5, cool_cap=1e-5, tension=20.0)
+    s = _blob_state(g, 0.0, 0.0)
+    ft = float(p["float_temp"])
+    s.temp = (ft - 0.05 + 0.04 * s.wax) * g.vessel  # melt band straddles the interface
+    e0 = float(ph.wax_energy(s.temp, s.wax, p).sum())
+    for _ in range(20):
+        s = ph.step(s, g, p, 0.5)
+    e1 = float(ph.wax_energy(s.temp, s.wax, p).sum())
+    assert abs(e1 - e0) < 2e-3 * abs(e0)

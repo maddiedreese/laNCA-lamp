@@ -80,9 +80,11 @@ def run(
         for i in range(n):
             # A little smooth thermal noise breaks the left-right symmetry, as real convection
             # does. Per-cell noise would seed grid-sized wax fragments, so it is blurred first.
+            # It is heat, so wax in its melt band pays latent heat for it like any other.
             jitter = torch.randn((1, 1, *geom.shape), generator=gen, device=device)
             jitter = torch.nn.functional.avg_pool2d(jitter, 9, 1, 4)[:, 0] * (noise * 9)
-            state.temp = (state.temp + jitter * geom.vessel).clamp(0, 1)
+            kicked = (state.temp + jitter * geom.vessel).clamp(0, 1)
+            state.temp = ph.absorb_latent(state.temp, kicked, state.wax, p)
             before = state
             try:
                 state = advance(state)

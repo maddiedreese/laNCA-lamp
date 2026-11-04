@@ -411,6 +411,64 @@ Stage B was not rerun: on refit3 every checkpoint did worse than the physics alo
 Still off in the best lamp: the warm-up is too fast (height 0.52-0.64 at 60 minutes vs 0.20),
 wax sinks about 30% too fast, and the cycle is about 10% short.
 
+**Eight seeds, latent heat, and stage B on refit4.** Three seeds were too few to rank
+anything. Over eight, refit4 scores 0.97, 1.24, 0.94, 0.94, 1.25, 4.38, 1.15 and 1.09 (mean
+1.50, median 1.12): on seed 5 one giant blob holds 60-76% of the wax. The same seed does not
+reproduce its score between a search and a rerun, because the runs are chaotic.
+
+The warm-up looked like missing latent heat, so `physics` now has an optional `latent`
+constant (in units of T; paraffin's is worth about 100 K, default 0). With it on, the flow
+carries energy `E = T + latent x wax x melted_share(T)` and temperature is recovered from E
+afterwards; heat added or lost, including the baseline's noise, pays latent heat through
+`absorb_latent`. The first version stalled the lamp, but that was a leak: surface tension and
+the noise moved or heated melted wax without moving its energy, removing heat about as fast
+as the heater added it. With those fixed, a sealed lamp matches its energy budget at latent 0
+and 0.5. The lamp still stalls with refit4's other constants, this time for a physical reason:
+a ball of wax sits beside the heater.
+
+| refit4 with | score |
+|---|---|
+| latent 0.25 | 18.9 |
+| latent 0.5, wider heater | 20.9 |
+| latent 0.5, wax conduction 0.15 | 40.9 |
+| latent 0.5, both | 27.9 |
+
+Two more searches did not beat refit4, and their constants were not added to `fits/`. A narrow
+search from refit4 (`--only`, over wax viscosity, wax buoyancy, `sink_ratio` and tension) has
+an 8-seed mean of 2.14, with blob share failing on 4 seeds. A full search that was free to use
+latent heat (18 constants, now including `latent`, `kappa_wax` and `kappa_liquid`) drove it
+down to 0.017 and has an 8-seed mean of 2.96, with blobs rising too slowly. So latent heat does
+not explain the warm-up within this model. The remaining guesses, untested, are the heater's
+own warm-up and heat held by the glass base.
+
+Stage B on refit4 starts from a fresh network, because `--init` would load older physics
+constants over refit4's (`--constants fits/refit4.json --temps refit4_s0 --flow-grad
+--checkpoint 2 --curriculum 16 32 64 128 --eval-free 128`, 300 iterations, 6 hours). Two 2-hour
+runs per checkpoint give means of 2.20, 1.72, 1.45, 1.38, 1.02 and 0.83 at iterations 50 to
+300, so the last checkpoint was run on all eight seeds:
+
+| seed | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | mean | median |
+|---|---|---|---|---|---|---|---|---|---|---|
+| refit4 physics | 0.97 | 1.24 | 0.94 | 0.94 | 1.25 | 4.38 | 1.15 | 1.09 | 1.50 | 1.12 |
+| refit4 + network, iteration 300 | 1.08 | 0.58 | 0.71 | 0.65 | 1.49 | **1.17** | 1.16 | 2.03 | **1.11** | 1.12 |
+
+| 8-seed mean | real | refit4 physics | refit4 + network |
+|---|---|---|---|
+| cycle period | 66 s | 57 s | **62 s** |
+| rise speed | 0.023 | **0.025** | 0.027 |
+| sink speed | 0.019 | 0.025 | **0.024** |
+| wax height | 0.46 | 0.58 | 0.58 |
+| wax transport (median) | 0.027 | 0.016 | 0.016 |
+
+Unlike on refit3, this network beats the physics alone, but only by failing less badly. It wins
+4 seeds and loses 4, and the medians match; without seed 5 the physics averages 1.08. What it
+adds is no giant-blob disaster (worst run 2.03, against 4.38) and a cycle period closer to real.
+
+Still off in the best lamp: height at 60 minutes is a top error on all eight seeds, wax sits
+high (about 15% in the bottom eighth vs 30%), and wax transport is about 60% of real. A second
+recording, ideally a cold start through at least the first hour, would show whether the warm-up
+gap is in the physics or only in this one clip.
+
 ## Footage
 
 All training data comes from one self-recorded clip, listed in `footage/manifest.json` and

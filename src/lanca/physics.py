@@ -198,6 +198,10 @@ PARAM_BOUNDS = {
     "heat_depth": (1.0, 30.0, 5.0),
     # Depth of the cooling zone under the cap (cells), at fixed total cap cooling.
     "cap_depth": (1.0, 30.0, 6.0),
+    # Latent heat of melting, in units of T: heat a cell of wax absorbs crossing the melt band.
+    # Without it, wax warms through its melting point as easily as liquid and the whole pool
+    # melts at once. Paraffin's latent heat is worth ~100 K of its own warming.
+    "latent": (0.0, 3.0, 0.0),
 }
 
 MAX_VISCOSITY = 1e4
@@ -627,6 +631,52 @@ def conduct(temp: Tensor, wax: Tensor, geom: Geometry, p: dict[str, Tensor], dt:
     return temp
 
 
+def melted_share(temp: Tensor, p: dict[str, Tensor]) -> Tensor:
+    """How much of the wax at temp has melted: 0 when cold, 1 above the melt band."""
+    return torch.sigmoid((temp - p["float_temp"] + MELT_BELOW) / MELT_WIDTH)
+
+
+def latent_on(p: dict[str, Tensor]) -> bool:
+    return float(p["latent"].detach().max()) > 1e-3  # the bounds keep it just above 0
+
+
+def wax_energy(temp: Tensor, wax: Tensor, p: dict[str, Tensor]) -> Tensor:
+    """Heat per cell, in units of T: sensible heat plus the latent heat of its melted wax."""
+    return temp + p["latent"] * wax * melted_share(temp, p)
+
+
+def temp_from_energy(energy: Tensor, wax: Tensor, p: dict[str, Tensor]) -> Tensor:
+    """Invert wax_energy for the temperature. Energy rises with T, and the root lies between
+    energy - latent * wax and energy, so bisection finds it; a final Newton step carries the
+    gradient."""
+    lw = p["latent"] * wax
+
+    def residual(t):
+        return t + lw * melted_share(t, p) - energy
+
+    with torch.no_grad():
+        lo, hi = energy - lw, energy.clone()
+        for _ in range(30):
+            mid = 0.5 * (lo + hi)
+            up = residual(mid) < 0
+            lo, hi = torch.where(up, mid, lo), torch.where(up, hi, mid)
+        t = 0.5 * (lo + hi)
+    m = melted_share(t, p)
+    slope = 1 + lw * m * (1 - m) / MELT_WIDTH
+    return t - residual(t) / slope
+
+
+def absorb_latent(before: Tensor, after: Tensor, wax: Tensor, p: dict[str, Tensor]) -> Tensor:
+    """Temperature after a heat change, once wax has paid latent heat to melt (or released it).
+
+    after is where heat alone would take each cell from before; its wax_energy changes by
+    exactly (after - before).
+    """
+    if not latent_on(p):
+        return after
+    return temp_from_energy(after + p["latent"] * wax * melted_share(before, p), wax, p)
+
+
 def heater_shape(geom: Geometry, width, depth) -> Tensor:
     """Bulb footprint: Gaussian across (width in half-widths of the floor), exponential up
     (depth in cells), peaking at 1."""
@@ -661,8 +711,7 @@ def heat_exchange(temp: Tensor, geom: Geometry, p: dict[str, Tensor], dt: float)
 
 def melted_volume(temp: Tensor, p: dict[str, Tensor]) -> Tensor:
     """Volume of wax at temp relative to solid wax: 1 when cold, 1 + expand once melted."""
-    melted = torch.sigmoid((temp - p["float_temp"] + MELT_BELOW) / MELT_WIDTH)
-    return 1 + p["expand"] * melted
+    return 1 + p["expand"] * melted_share(temp, p)
 
 
 def neumann_poisson(f: Tensor, geom: Geometry, tol: float = 1e-3, max_iter: int = 500) -> Tensor:
@@ -860,8 +909,13 @@ def advance(
     mass = state.mass
     if expanding and mass is None:
         mass = wax_mass(wax, temp, p).detach()
+    # With latent heat, the flow carries each cell's energy rather than its temperature, and
+    # wax moved alone (compression, tension) leaves its energy behind; temperature is then
+    # recovered from the energy, so melting heat is never lost or made where wax moves.
+    latent = latent_on(p)
+    heat = wax_energy(temp, wax, p) if latent else temp
     for _ in range(n):
-        wax, temp = advect(wax, fx, fy), advect(temp, fx, fy)
+        wax, heat = advect(wax, fx, fy), advect(heat, fx, fy)
         wax = apply_exchange(wax, *compression_faces(wax, geom, fx, fy, p["compress"]))
         if hidden is not None:
             hidden = advect(hidden, fx, fy)
@@ -869,10 +923,12 @@ def advance(
     wax = apply_tension(wax, geom, p, dt, grad_substeps=tension_grad_substeps)
     if exchange_extra is not None:
         wax = apply_exchange(wax, *exchange_faces(wax, geom, *exchange_extra))
+    temp = temp_from_energy(heat, wax, p) if latent else heat
 
     before = temp
     temp = conduct(temp, wax, geom, p, dt)
     temp = heat_exchange(temp, geom, p, dt)
+    temp = absorb_latent(before, temp, wax, p)
     if expanding:
         wax, temp, hidden = expand(wax, temp, hidden, before, geom, p, mass)
     # No clamping: bounds hold by construction, and clamping would break exact conservation.

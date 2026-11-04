@@ -3,6 +3,8 @@
     uv run python -m lanca.fit_constants --generations 6 --population 8 --workers 4
     uv run python -m lanca.fit_constants --init fits/tension.json --set cool_wall=0.0022 \
         --sigma 0.25 --seeds 2 --name refit
+    uv run python -m lanca.fit_constants --init fits/refit4.json --only visc_wax tension \
+        --worst 0.5 --seeds 3 --name narrow
 
 Timing only shows up over whole runs (warm-up takes ~45 minutes), and differentiating through
 thousands of flow solves is impractical, so this is a derivative-free search: the
@@ -45,6 +47,9 @@ SEARCH = [
     "heat_width",
     "heat_depth",
     "cap_depth",
+    "latent",
+    "kappa_wax",
+    "kappa_liquid",
 ]
 LINEAR = {"float_temp"}
 
@@ -134,19 +139,21 @@ def average(results: list[dict], worst: float = 0.0) -> dict:
     }
 
 
+def clip(k: str, val: float) -> float:
+    from lanca.physics import PARAM_BOUNDS
+
+    lo, hi, _ = PARAM_BOUNDS[k]
+    return float(min(max(val, lo + 1e-6 * (hi - lo)), hi - 1e-6 * (hi - lo)))
+
+
 def to_vector(constants: dict) -> np.ndarray:
-    return np.array([constants[k] if k in LINEAR else math.log(constants[k]) for k in SEARCH])
+    return np.array(
+        [constants[k] if k in LINEAR else math.log(clip(k, constants[k])) for k in SEARCH]
+    )
 
 
 def from_vector(v: np.ndarray) -> dict:
-    from lanca.physics import PARAM_BOUNDS
-
-    out = {}
-    for k, x in zip(SEARCH, v):
-        lo, hi, _ = PARAM_BOUNDS[k]
-        val = x if k in LINEAR else math.exp(x)
-        out[k] = float(min(max(val, lo + 1e-6 * (hi - lo)), hi - 1e-6 * (hi - lo)))
-    return out
+    return {k: clip(k, x if k in LINEAR else math.exp(x)) for k, x in zip(SEARCH, v)}
 
 
 def main() -> None:
@@ -169,7 +176,19 @@ def main() -> None:
         "--set", nargs="*", default=[], metavar="NAME=VALUE", help="override starting constants"
     )
     ap.add_argument("--name", default=None, help="write to runs/fit/<name>/")
+    ap.add_argument(
+        "--only", nargs="*", default=None, metavar="NAME", help="search just these constants"
+    )
+    ap.add_argument(
+        "--spread", nargs="*", default=[], metavar="NAME=SIGMA", help="per-constant initial spread"
+    )
     args = ap.parse_args()
+    global SEARCH
+    if args.only:
+        unknown = set(args.only) - set(SEARCH)
+        if unknown:
+            ap.error(f"not searchable: {sorted(unknown)}")
+        SEARCH = [k for k in SEARCH if k in args.only]
 
     from lanca.physics import PARAM_BOUNDS
 
@@ -183,7 +202,10 @@ def main() -> None:
     fixed = {k: v for k, v in start.items() if k not in SEARCH}
     mean = to_vector(start)
     sigma = np.full(len(SEARCH), args.sigma)
-    sigma[SEARCH.index("float_temp")] = 0.16 * args.sigma
+    if "float_temp" in SEARCH:
+        sigma[SEARCH.index("float_temp")] = 0.16 * args.sigma
+    for k, v in (kv.split("=") for kv in args.spread):
+        sigma[SEARCH.index(k)] = float(v)
     rng = np.random.default_rng(0)
     history: list[dict] = []
     best: dict | None = None
