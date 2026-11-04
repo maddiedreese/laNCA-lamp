@@ -16,6 +16,8 @@ footage/      manifest.json, CREDITS.md, processing.json, fetch.py (clips are gi
 masks/        per-clip wax masks (.npz) and segmentation settings (.json)
 stats/        measured behavior targets per clip (cycle period, rise speed, blob sizes, ...)
 src/lanca/    extract, segment, measure, physics, model, train, eval
+fits/         fitted physical constants (.json)
+models/       best trained model (network plus its constants)
 tests/        physics-core and environment tests
 runs/         checkpoints, rollout videos, plots (gitignored)
 ```
@@ -445,7 +447,9 @@ Stage B on refit4 starts from a fresh network, because `--init` would load older
 constants over refit4's (`--constants fits/refit4.json --temps refit4_s0 --flow-grad
 --checkpoint 2 --curriculum 16 32 64 128 --eval-free 128`, 300 iterations, 6 hours). Two 2-hour
 runs per checkpoint give means of 2.20, 1.72, 1.45, 1.38, 1.02 and 0.83 at iterations 50 to
-300, so the last checkpoint was run on all eight seeds:
+300, so the last checkpoint was run on all eight seeds. It is committed as
+`models/stage_b_refit4_iter300.pt`; run it with `uv run python -m lanca.baseline --checkpoint
+models/stage_b_refit4_iter300.pt --name best --seed 0`.
 
 | seed | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | mean | median |
 |---|---|---|---|---|---|---|---|---|---|---|
