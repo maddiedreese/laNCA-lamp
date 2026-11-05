@@ -473,11 +473,60 @@ high (about 15% in the bottom eighth vs 30%), and wax transport is about 60% of 
 recording, ideally a cold start through at least the first hour, would show whether the warm-up
 gap is in the physics or only in this one clip.
 
+**A second recording, and a blob counter that works on both.** `lamp-2026-11-04` is the same
+lamp filmed from a true cold start: the bulb comes on 2 s in, and it runs 2 h 18 min. Nothing
+has been fitted to it. It shows the slow warm-up is real and repeatable, so the fault is in the
+model. Median wax height per 10 minutes of lamp age:
+
+| minutes | 0-10 | 10-20 | 20-30 | 30-40 | 40-50 | 50-60 | 60-70 | 70-80 | 80-90 | 90-100 | 100-110 | 110-120 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `lamp-2026-10-25` | 0.10 | 0.28 | 0.15 | 0.21 | 0.34 | 0.20 | 0.33 | 0.45 | 0.46 | 0.55 | 0.57 | 0.60 |
+| `lamp-2026-11-04` | 0.12 | 0.19 | 0.19 | 0.19 | 0.25 | 0.26 | 0.32 | 0.43 | 0.48 | 0.52 | 0.58 | 0.61 |
+
+In the new clip the wax first rises at about 13.5 minutes, as in the first clip, then stands as
+a column that barely moves for over 20 minutes, slumps into a dome by 46 minutes, and swells into
+a large balloon by 55. No model does this yet.
+
+The new camera sits lower, so the lamp leans about 6 degrees and wax under the cap shows clearly.
+Both broke the free-blob count, so `measure.components` now tests for the pool against the floor
+of each column (`POOL_ROWS` is 4) and does not count wax entirely within the top 14 rows
+(`CAP_ROWS`). This changes the first clip's targets too: regular cycling starts at 72 minutes, not
+47, and over that later window wax height goes from 0.46 to 0.54, blob share from 0.28 to 0.41
+and merges from 8.5 to 11.2 per minute. Scores below are not comparable with those above.
+
+| target | `lamp-2026-10-25` | `lamp-2026-11-04` |
+|---|---|---|
+| first free blob | 812 s | 2532 s |
+| regular cycling from | 4330 s | 4500 s |
+| cycle period | 66 s | 72 s |
+| rise speed | 0.025 | 0.022 |
+| sink speed | 0.019 | 0.018 |
+| blob share of all wax | 0.41 | 0.41 |
+| free blobs | 2 | 2 |
+| wax height | 0.54 | 0.57 |
+| merges per minute | 11.2 | 14.9 |
+
+Scoring one clip against the other gives 1.38, of which 1.29 is first blob and only 0.09
+everything else. That 0.09 is the best score a model could expect, and it shows first blob is
+partly chance: the first clip's plume threw off a blob that lasted 46 s, while the new clip's
+stayed attached.
+
+| 8 seeds | `lamp-2026-10-25` mean, median, worst | `lamp-2026-11-04` mean, median, worst |
+|---|---|---|
+| refit4 physics | 1.84, 1.73, 3.01 | 2.83, 2.87, 4.06 |
+| refit4 + network, iteration 300 | **1.43, 1.25, 2.97** | **2.40, 2.25, 3.79** |
+
+With the corrected counter, the network's lead is no longer only about one bad seed. It wins 6
+of 8 seeds on the first clip, though 4 of 8 on the new one. Its lower scores on the clip it never
+saw show it generalizes, though most of the higher error there is first blob and merges. Height
+at 60 minutes remains wrong for both, at 0.52-0.66 against 0.32-0.33 real.
+
 ## Footage
 
-All training data comes from one self-recorded clip, listed in `footage/manifest.json` and
-credited in `footage/CREDITS.md`. The raw video (10.8 GB) is not committed; place it at
-`footage/clips/<filename>` and run `uv run python footage/fetch.py` to verify its hash.
+All data comes from two self-recorded clips, listed in `footage/manifest.json` and credited in
+`footage/CREDITS.md`; training has used only the first so far. The raw videos (10.8 and 12.4 GB)
+are not committed; place them at `footage/clips/<filename>` and run
+`uv run python footage/fetch.py` to verify their hashes.
 
 ## Roadmap
 

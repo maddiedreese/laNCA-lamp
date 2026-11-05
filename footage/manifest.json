@@ -29,6 +29,21 @@
       "duration_s": 7201.08,
       "video": "QuickTime, H.264 High, 1620x1080, ~29.92 fps average (variable), no audio, 10.8 GB",
       "notes": "Rocket-style lamp: orange/red wax in violet liquid, silver base and nose cone. Recording starts from cold, so it covers the full warm-up and about 85 minutes of steady cycling. No cool-down. Camera drifts slowly (about 40 px left and 100 px up over the recording, plus slight zoom/tilt), so frames are stabilized against the lamp body before masking."
+    },
+    {
+      "id": "lamp-2026-11-04",
+      "source": "self-recorded",
+      "download_url": null,
+      "filename": "lamp-2026-11-04.mov",
+      "sha256": "e428aa3f1fdefb5e32e9a797bfa0ece25b7909468b0ccd50ca60993921373442",
+      "author": "Maddie D. Reese",
+      "license": "All rights reserved (owned by the project author; not redistributed)",
+      "attribution": "Recorded by Maddie D. Reese for laNCA-lamp",
+      "recorded": "2026-11-04",
+      "speed_factor": 1.0,
+      "duration_s": 8289.77,
+      "video": "QuickTime, H.264, 1620x1080, ~29.92 fps average, no audio, 12.4 GB",
+      "notes": "Same rocket-style lamp as lamp-2026-10-25, filmed closer and from lower, so the lamp leans about 6 degrees in frame. Cold start: the bulb switches on about 2 s into the clip. Covers the full warm-up and steady cycling. No cool-down."
     }
   ]
 }

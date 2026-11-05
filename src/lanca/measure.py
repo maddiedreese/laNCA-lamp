@@ -8,7 +8,8 @@ import cv2
 import numpy as np
 
 MIN_BLOB_PX = 4  # components smaller than this are treated as segmentation noise
-POOL_ROWS = 3  # a component touching the bottom this many rows is the pool, not a free blob
+POOL_ROWS = 4  # a component this close to the floor of its own columns is the pool, not a free blob
+CAP_ROWS = 14  # a component entirely this close to the top is wax stuck under the cap, not free
 
 
 def components(mask: np.ndarray, vessel: np.ndarray) -> tuple[np.ndarray, list[dict]]:
@@ -16,7 +17,12 @@ def components(mask: np.ndarray, vessel: np.ndarray) -> tuple[np.ndarray, list[d
     h = mask.shape[0]
     binary = ((mask >= 0.5) & vessel).astype(np.uint8)
     n, labels, stats, cents = cv2.connectedComponentsWithStats(binary, connectivity=8)
-    vessel_bottom = np.nonzero(vessel.any(1))[0].max()
+    inside = vessel > 0
+    # The lamp leans in the frame, so its floor is not one row: compare within each column.
+    floor = h - 1 - inside[::-1].argmax(0)
+    near_floor = (np.arange(h)[:, None] > floor - POOL_ROWS) & inside.any(0)
+    pool_labels = set(np.unique(labels[near_floor]).tolist())
+    vessel_top = np.nonzero(inside.any(1))[0].min()
     blobs = []
     for i in range(1, n):
         area = stats[i, cv2.CC_STAT_AREA]
@@ -30,7 +36,8 @@ def components(mask: np.ndarray, vessel: np.ndarray) -> tuple[np.ndarray, list[d
                 "area": int(area),
                 "cx": float(cents[i, 0]),
                 "height": float((h - 1 - cents[i, 1]) / (h - 1)),
-                "pool": bool(bottom >= vessel_bottom - POOL_ROWS + 1),
+                "pool": i in pool_labels,
+                "cap": bool(bottom < vessel_top + CAP_ROWS),
             }
         )
     return labels, blobs
@@ -49,7 +56,7 @@ def per_frame(masks: np.ndarray, vessel: np.ndarray) -> dict[str, np.ndarray]:
     free = np.zeros(len(masks), np.int32)
     for i, mk in enumerate(masks):
         _, blobs = components(mk, vessel)
-        free[i] = sum(not b["pool"] for b in blobs)
+        free[i] = sum(not b["pool"] and not b["cap"] for b in blobs)
     return {"area": area / vessel_area, "top_half": top, "height": height, "free_blobs": free}
 
 
@@ -88,7 +95,7 @@ def track(masks: np.ndarray, vessel: np.ndarray, fps: float) -> dict[str, np.nda
         for b, srcs in sources.items():
             if len(srcs) == 1 and len(targets[srcs[0]]) == 1:
                 cur, old = by_label[b], prev_by_label[srcs[0]]
-                if not cur["pool"] and not old["pool"]:
+                if not any(b["pool"] or b["cap"] for b in (cur, old)):
                     velocities.append((cur["height"] - old["height"]) * fps)
                     areas.append(cur["area"] / vessel_area)
                     shares.append(cur["area"] / wax_px)

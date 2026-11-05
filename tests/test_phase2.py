@@ -76,6 +76,26 @@ def test_components_separate_pool_from_free_blob():
     assert sorted(b["pool"] for b in blobs) == [False, True]
 
 
+def test_components_use_each_columns_floor():
+    # A leaning lamp: the floor is higher on the right, and the pool sits on that side.
+    vessel = np.ones((64, 32), bool)
+    vessel[54:, 16:] = False
+    mask = np.zeros((64, 32), np.float32)
+    mask[50:54, 20:30] = 1.0
+    _, blobs = measure.components(mask, vessel)
+    assert blobs[0]["pool"]
+
+
+def test_wax_stuck_under_the_cap_is_not_a_free_blob():
+    vessel = np.ones((64, 32), bool)
+    mask = np.zeros((64, 32), np.float32)
+    mask[2:8, 10:20] = 1.0
+    mask[30:40, 10:20] = 1.0
+    _, blobs = measure.components(mask, vessel)
+    assert sorted(b["cap"] for b in blobs) == [False, True]
+    assert measure.per_frame(mask[None], vessel)["free_blobs"][0] == 1
+
+
 def test_track_measures_rise_speed():
     masks, vessel = _blob_frames(speed=2)
     tr = measure.track(masks, vessel, fps=10.0)
