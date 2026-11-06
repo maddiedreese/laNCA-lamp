@@ -5,7 +5,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
-# Raw footage is never committed; footage/fetch.py re-downloads it from manifest.json
+# Raw footage is never committed or distributed; footage/fetch.py checks local copies' hashes
 footage/clips/
 footage/frames/
 

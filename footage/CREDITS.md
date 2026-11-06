@@ -7,3 +7,6 @@ clip in `manifest.json`.
   recorded by Maddie D. Reese for this project.
 - **lamp-2026-11-04**: a 2 h 18 min recording of the same lamp from cold start, recorded by
   Maddie D. Reese for this project.
+
+The recordings remain all rights reserved and aren't distributed. The masks derived from them,
+in `masks/`, are under this repo's MIT License.
