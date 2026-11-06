@@ -4,6 +4,8 @@ A lava lamp simulator powered by a **physics-structured neural cellular automato
 
 **[See it running live in your browser](https://www.maddiedreese.com/lava/)**
 
+<p align="center"><img src="docs/lamp.webp" alt="The simulated lava lamp: red wax in purple liquid, in a silver lamp with a glowing bulb" width="480"></p>
+
 The network decides how the wax flows; hard-coded physics moves the wax and heat. Wax is
 conserved exactly, and blobs rise because they are hot, not because the model learned that blobs
 near the bottom tend to go up. The model is trained on wax masks from a two-hour recording of a
