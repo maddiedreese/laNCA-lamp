@@ -205,6 +205,7 @@ PARAM_BOUNDS = {
     # Heat capacity of the liquid relative to the wax. Water-based lamp liquid holds about twice
     # the heat of paraffin per degree, so it warms slowly and long after the wax has melted.
     "cap_liquid": (1.0, 20.0, 1.0),
+    "float_local": (0.0, 1.0, 0.0),  # how much the float temperature follows nearby liquid
 }
 
 MAX_VISCOSITY = 1e4
@@ -435,11 +436,26 @@ def stokes_stream(
     return mobility * F.pad(x, (1, 1, 1, 1)), x
 
 
+def float_threshold(wax: Tensor, temp: Tensor, v: Tensor, p: dict[str, Tensor]) -> Tensor:
+    """Temperature at which wax floats. Warmer liquid is lighter, so wax must be hotter to float.
+
+    With float_local on, the threshold moves toward the temperature of the liquid within a few
+    cells. It matches float_temp wherever that liquid sits at float_temp.
+    """
+    if float(p["float_local"].detach().max()) < 1e-3:  # bounds keep it just above 0
+        return p["float_temp"]
+    liquid = (1 - wax) * v
+    near = F.avg_pool2d(liquid[:, None], 15, 1, 7)[:, 0]
+    heat = F.avg_pool2d((temp * liquid)[:, None], 15, 1, 7)[:, 0]
+    local = torch.where(near > 1e-3, heat / near.clamp(min=1e-3), p["float_temp"].expand_as(near))
+    return p["float_temp"] + p["float_local"] * (local - p["float_temp"])
+
+
 def buoyancy(state: State, geom: Geometry, p: dict[str, Tensor]) -> Tensor:
     wax, temp = state.wax, state.temp
     v = geom.vessel
     mean_t = (temp * v).sum((1, 2), keepdim=True) / v.sum()
-    excess = temp - p["float_temp"]
+    excess = temp - float_threshold(wax, temp, v, p)
     excess = torch.where(excess < 0, excess * p["sink_ratio"], excess)
     b_wax = p["buoy_wax"] * wax * excess
     b_liq = p["buoy_liquid"] * (1 - wax) * (temp - mean_t)

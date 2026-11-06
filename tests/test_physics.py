@@ -542,3 +542,24 @@ def test_flow_mixes_temperature_by_heat_capacity():
     before = float((wax * ph.heat_capacity(wax, p)).sum())
     after = float((state.temp * ph.heat_capacity(state.wax, p)).sum())
     assert abs(after - before) < 0.1 * before
+
+
+def test_float_local_makes_wax_harder_to_float_in_warm_liquid():
+    v = _vessel().to(torch.float32)
+    wax = torch.zeros(1, H, W)
+    wax[0, H // 2 - 2 : H // 2 + 2, W // 2 - 2 : W // 2 + 2] = 1
+    wax = wax * v
+
+    def threshold_in(liquid_temp, local):
+        p = ph.Params(float_temp=0.45, float_local=local).values()
+        temp = liquid_temp * (1 - wax) * v + 0.5 * wax
+        return ph.float_threshold(wax, temp, v, p)
+
+    inside = wax.bool()
+    off = threshold_in(0.8, 0.0)
+    assert abs(float(off.max()) - 0.45) < 1e-4 and off.numel() == 1
+    cold = threshold_in(0.2, 0.5)[inside].mean()
+    warm = threshold_in(0.8, 0.5)[inside].mean()
+    level = threshold_in(0.45, 0.5)[inside].mean()
+    assert cold < level < warm
+    assert abs(float(level) - 0.45) < 1e-3

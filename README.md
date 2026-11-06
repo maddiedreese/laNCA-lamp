@@ -566,6 +566,42 @@ only by keeping wax low throughout: it reaches 0.32-0.44 at 90 minutes. All the 
 0.47-0.66 at 60 minutes. Nothing here reproduces the slow climb or the new clip's plume, which
 stalls near height 0.39 for over 20 minutes, and neither latent heat nor slow liquid explains them.
 
+**Noise and layered liquid: the warm-up stays a known limitation.** The real first rise repeats
+within 2 s, but simulated lamps differ by hundreds of seconds, so `--noise` was lowered to a
+quarter of its default. It doesn't help:
+
+| 8 seeds, both clips | mean, median, worst | first rise (real 816 s) | never cycled |
+|---|---|---|---|
+| refit4 physics | 2.21, 2.16, 3.29 | 826-1240 s | 0 |
+| refit4 physics, quarter noise | 2.69, 1.95, 6.31 | 1016-1249 s | 1 |
+| iteration 300 | **1.67, 1.48**, 3.18 | 682-1100 s | 0 |
+| iteration 300, quarter noise | 2.80, 2.26, 5.90 | 742-1315 s | 1 |
+
+The other idea was liquid that stays warm at the bottom and cold at the top, holding the plume
+back. Wax buoyancy compares wax with a fixed float temperature, so a new constant, `float_local`,
+moves that temperature toward the nearby liquid's. It is off at its default of 0. Single lamps on
+the refit4 constants, seed 0, so they show direction only:
+
+| lamp | height at 60 min (real 0.32-0.33) | height at 90 min (real 0.52-0.55) | first rise | top minus bottom liquid T at 15 min | score |
+|---|---|---|---|---|---|
+| unchanged | 0.64 | 0.59 | 1220 s | -0.07 | 1.45 |
+| `kappa_liquid` 0.05 | 0.60 | 0.61 | 1030 s | -0.05 | 1.30 |
+| `kappa_liquid` 0.015 | 0.57 | 0.62 | 944 s | -0.08 | 4.65 |
+| `buoy_liquid` 0 | 0.60 | 0.60 | 615 s | -0.38 | 5.33 |
+| `kappa_liquid` 0.015, `buoy_liquid` 0 | 0.58 | 0.60 | 385 s | -0.29 | 2.88 |
+| same, `cap_liquid` 1.25 | 0.60 | 0.62 | 813 s | -0.38 | 3.93 |
+| `float_local` 0.5 | 0.57 | 0.62 | 872 s | -0.06 | 5.62 |
+| `float_local` 1 | 0.52 | 0.58 | 943 s | -0.01 | 12.80 |
+| `kappa_liquid` 0.015, `buoy_liquid` 0, `float_local` 0.5 | 0.57 | 0.58 | 247 s | -0.13 | 9.17 |
+
+Without liquid convection the liquid does layer, but by 30 minutes the difference has mostly
+gone, and keeping heat near the wax makes it climb sooner, not later. The plume top stays below
+0.30 in every lamp, against 0.39 or more in the footage. No long search was run, since no lamp
+showed a stall or a low 60-minute height with a normal 90-minute one, though these lamps leave
+the other constants fixed and don't prove no setting could work. Latent heat, slow liquid, layering and
+noise have now all failed to explain the warm-up. The model is a good hot lamp whose cold start
+climbs too early, reaching about 0.6 by 60 minutes where the real lamp takes about 90.
+
 ## Footage
 
 All data comes from two self-recorded clips, listed in `footage/manifest.json` and credited in

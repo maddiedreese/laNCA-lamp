@@ -158,6 +158,7 @@ def main() -> None:
     ap.add_argument("--constants", default=None, help="constants JSON from fit_constants")
     ap.add_argument("--checkpoint", default=None, help="trained model checkpoint to run instead")
     ap.add_argument("--seed", type=int, default=0, help="thermal noise seed")
+    ap.add_argument("--noise", type=float, default=2e-3, help="thermal noise strength")
     args = ap.parse_args()
     if args.threads:
         torch.set_num_threads(args.threads)
@@ -186,7 +187,7 @@ def main() -> None:
     out = ROOT / "runs" / "physics" / args.name
     out.mkdir(parents=True, exist_ok=True)
     start = time.time()
-    frames, temps, vessel = run(params, args.minutes, args.dt, args.device, seed=args.seed, model=model)
+    frames, temps, vessel = run(params, args.minutes, args.dt, args.device, seed=args.seed, noise=args.noise, model=model)
     print(f"simulated {args.minutes:.0f} min in {time.time() - start:.0f}s")
 
     fps = 1 / args.dt
