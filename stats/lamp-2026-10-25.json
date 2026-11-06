@@ -4,6 +4,7 @@
   "fps": 10.0,
   "duration_s": 7201.1,
   "phases": {
+    "first_rise_s": 815.4,
     "first_blob_s": 811.6,
     "cycling_s": 4330.2
   },

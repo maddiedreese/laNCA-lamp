@@ -508,3 +508,37 @@ def test_latent_heat_is_conserved_while_wax_moves():
         s = ph.step(s, g, p, 0.5)
     e1 = float(ph.wax_energy(s.temp, s.wax, p).sum())
     assert abs(e1 - e0) < 2e-3 * abs(e0)
+
+
+def test_liquid_heat_capacity_conserves_energy_and_slows_warming():
+    vessel = torch.ones(32, 16, dtype=torch.bool)
+    geom = ph.Geometry(vessel)
+    params = ph.Params(cap_liquid=4.0)
+    p = {k: v.detach() for k, v in params.values().items()}
+    wax = torch.zeros(1, 32, 16)
+    wax[:, 24:] = 1.0
+    temp = 0.5 * wax
+    conducted = ph.slow_liquid(temp, ph.conduct(temp, wax, geom, p, 1.0), wax, p)
+    capacity = wax + p["cap_liquid"] * (1 - wax)
+    assert abs((conducted * capacity).sum() - (temp * capacity).sum()) < 1e-3
+    # Heat reaching the liquid warms it a quarter as much as it would warm wax.
+    plain = ph.conduct(temp, wax, geom, p, 1.0)
+    assert abs(float(conducted[0, 23, 8]) - float(plain[0, 23, 8]) / 4.0) < 1e-5
+
+
+def test_flow_mixes_temperature_by_heat_capacity():
+    # Hot wax stirred into cold, heavy liquid warms it by far less than an even average.
+    geom = ph.Geometry(torch.ones(32, 16, dtype=torch.bool))
+    p = {k: v.detach() for k, v in ph.Params(cap_liquid=9.0, tension=1e-3).values().items()}
+    wax = torch.zeros(1, 32, 16)
+    wax[:, :, :8] = 1.0
+    state = ph.State(wax=wax, temp=wax.clone())
+    psi = torch.zeros(1, 33, 17)
+    psi[:, 8:25, 4:13] = 0.5
+    state = ph.advance(state, geom, p, 2.0, psi)
+    assert float(state.temp.max()) <= 1.0 + 1e-5
+    assert float(state.temp.min()) >= -1e-5
+    # Energy is kept: a plain average of temperatures would nearly double it here.
+    before = float((wax * ph.heat_capacity(wax, p)).sum())
+    after = float((state.temp * ph.heat_capacity(state.wax, p)).sum())
+    assert abs(after - before) < 0.1 * before

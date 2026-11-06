@@ -10,6 +10,7 @@ import numpy as np
 MIN_BLOB_PX = 4  # components smaller than this are treated as segmentation noise
 POOL_ROWS = 4  # a component this close to the floor of its own columns is the pool, not a free blob
 CAP_ROWS = 14  # a component entirely this close to the top is wax stuck under the cap, not free
+RISE_HEIGHT = 0.3  # the wax has started rising once the pool reaches this height
 
 
 def components(mask: np.ndarray, vessel: np.ndarray) -> tuple[np.ndarray, list[dict]]:
@@ -54,10 +55,19 @@ def per_frame(masks: np.ndarray, vessel: np.ndarray) -> dict[str, np.ndarray]:
     top = m[:, : h // 2].sum((1, 2)) / vessel_area
     height = (m * rows).sum((1, 2)) / np.maximum(area, 1e-6)
     free = np.zeros(len(masks), np.int32)
+    pool_top = np.zeros(len(masks), np.float32)
     for i, mk in enumerate(masks):
-        _, blobs = components(mk, vessel)
+        labels, blobs = components(mk, vessel)
         free[i] = sum(not b["pool"] and not b["cap"] for b in blobs)
-    return {"area": area / vessel_area, "top_half": top, "height": height, "free_blobs": free}
+        rows = np.nonzero(np.isin(labels, [b["label"] for b in blobs if b["pool"]]).any(1))[0]
+        pool_top[i] = (h - 1 - rows.min()) / (h - 1) if len(rows) else 0.0
+    return {
+        "area": area / vessel_area,
+        "top_half": top,
+        "height": height,
+        "free_blobs": free,
+        "pool_top": pool_top,
+    }
 
 
 def track(masks: np.ndarray, vessel: np.ndarray, fps: float) -> dict[str, np.ndarray]:
@@ -131,6 +141,7 @@ def phases(
 ) -> dict[str, float | None]:
     """Find warm-up milestones from the per-frame series.
 
+    first_rise: first time the pool reaches RISE_HEIGHT continuously for hold_s.
     first_blob: first time a free blob exists continuously for hold_s.
     cycling: start of regular cycling, the point after which the 5-minute rolling mean of the
     free-blob count never drops below 1. Earlier, the wax rises as plumes and columns that stay
@@ -153,7 +164,12 @@ def phases(
         start = bad[-1] + 1 if len(bad) else 0
         if start < len(roll):
             cycling = float(start / fps)
-    return {"first_blob_s": first_blob, "cycling_s": cycling}
+    first_rise = None
+    if "pool_top" in series:
+        run = np.convolve((series["pool_top"] > RISE_HEIGHT).astype(int), np.ones(hold, int), "valid")
+        idx = np.nonzero(run == hold)[0]
+        first_rise = float(idx[0] / fps) if len(idx) else None
+    return {"first_rise_s": first_rise, "first_blob_s": first_blob, "cycling_s": cycling}
 
 
 def _quantiles(x: np.ndarray) -> dict[str, float] | None:

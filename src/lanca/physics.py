@@ -202,6 +202,9 @@ PARAM_BOUNDS = {
     # Without it, wax warms through its melting point as easily as liquid and the whole pool
     # melts at once. Paraffin's latent heat is worth ~100 K of its own warming.
     "latent": (0.0, 3.0, 0.0),
+    # Heat capacity of the liquid relative to the wax. Water-based lamp liquid holds about twice
+    # the heat of paraffin per degree, so it warms slowly and long after the wax has melted.
+    "cap_liquid": (1.0, 20.0, 1.0),
 }
 
 MAX_VISCOSITY = 1e4
@@ -677,6 +680,21 @@ def absorb_latent(before: Tensor, after: Tensor, wax: Tensor, p: dict[str, Tenso
     return temp_from_energy(after + p["latent"] * wax * melted_share(before, p), wax, p)
 
 
+def capacity_on(p: dict[str, Tensor]) -> bool:
+    return float(p["cap_liquid"].detach().max()) > 1.01  # the bounds keep it just above 1
+
+
+def heat_capacity(wax: Tensor, p: dict[str, Tensor]) -> Tensor:
+    return wax + p["cap_liquid"] * (1 - wax)
+
+
+def slow_liquid(before: Tensor, after: Tensor, wax: Tensor, p: dict[str, Tensor]) -> Tensor:
+    """Scale a temperature change from heat gained or lost by each cell's heat capacity."""
+    if not capacity_on(p):
+        return after
+    return before + (after - before) / heat_capacity(wax, p)
+
+
 def heater_shape(geom: Geometry, width, depth) -> Tensor:
     """Bulb footprint: Gaussian across (width in half-widths of the floor), exponential up
     (depth in cells), peaking at 1."""
@@ -914,8 +932,15 @@ def advance(
     # recovered from the energy, so melting heat is never lost or made where wax moves.
     latent = latent_on(p)
     heat = wax_energy(temp, wax, p) if latent else temp
+    # With a heavier liquid, mixing averages temperature by heat capacity, or wax would warm the
+    # liquid degree for degree. Capacity and energy move alike, so their ratio stays in bounds.
+    capacity = heat_capacity(wax, p) if capacity_on(p) and not latent else None
+    if capacity is not None:
+        heat = temp * capacity
     for _ in range(n):
         wax, heat = advect(wax, fx, fy), advect(heat, fx, fy)
+        if capacity is not None:
+            capacity = advect(capacity, fx, fy)
         wax = apply_exchange(wax, *compression_faces(wax, geom, fx, fy, p["compress"]))
         if hidden is not None:
             hidden = advect(hidden, fx, fy)
@@ -924,10 +949,14 @@ def advance(
     if exchange_extra is not None:
         wax = apply_exchange(wax, *exchange_faces(wax, geom, *exchange_extra))
     temp = temp_from_energy(heat, wax, p) if latent else heat
+    if capacity is not None:
+        inside = capacity > 0
+        temp = torch.where(inside, heat / capacity.clamp(min=1e-6), torch.zeros_like(heat))
 
     before = temp
     temp = conduct(temp, wax, geom, p, dt)
     temp = heat_exchange(temp, geom, p, dt)
+    temp = slow_liquid(before, temp, wax, p)
     temp = absorb_latent(before, temp, wax, p)
     if expanding:
         wax, temp, hidden = expand(wax, temp, hidden, before, geom, p, mass)

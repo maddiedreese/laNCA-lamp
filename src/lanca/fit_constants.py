@@ -50,12 +50,19 @@ SEARCH = [
     "latent",
     "kappa_wax",
     "kappa_liquid",
+    "cap_liquid",
 ]
 LINEAR = {"float_temp"}
 
+# Recordings every candidate is scored against; its score is the mean over them.
+CLIPS = ["lamp-2026-10-25", "lamp-2026-11-04"]
+
 # Behavior stats compared to the footage, with weights. Each term is (log(sim / real))^2.
 TARGETS = [
-    ("first_blob_s", 1.0, lambda s: s["phases"]["first_blob_s"]),
+    # The wax first rises at the same time in both clips; whether that first plume sheds a blob
+    # is partly chance (812 s in one clip, 2532 s in the other).
+    ("first_rise_s", 2.0, lambda s: s["phases"].get("first_rise_s")),
+    ("first_blob_s", 0.25, lambda s: s["phases"]["first_blob_s"]),
     ("cycling_s", 1.0, lambda s: s["phases"]["cycling_s"]),
     ("cycle_period_s", 2.0, lambda s: s["cycling"]["cycle_period_s"]),
     ("rise_speed", 2.0, lambda s: (s["cycling"]["rise_speed"] or {}).get("p50")),
@@ -99,6 +106,14 @@ def score(sim: dict, real: dict) -> tuple[float, dict]:
     return sum(parts.values()), parts
 
 
+def score_clips(sim: dict) -> tuple[float, dict]:
+    """Score against every clip in CLIPS: the mean total and mean parts."""
+    reals = [json.loads((ROOT / "stats" / f"{c}.json").read_text()) for c in CLIPS]
+    scored = [score(sim, real) for real in reals]
+    parts = {k: float(np.mean([p[k] for _, p in scored])) for k in scored[0][1]}
+    return float(np.mean([t for t, _ in scored])), parts
+
+
 def evaluate(args: tuple[dict, int, float]) -> dict:
     """Run one candidate in a worker process and return its stats and score."""
     overrides, threads, minutes, seed = args
@@ -109,12 +124,11 @@ def evaluate(args: tuple[dict, int, float]) -> dict:
     from lanca.baseline import run
 
     torch.set_num_threads(threads)
-    real = json.loads((ROOT / "stats" / "lamp-2026-10-25.json").read_text())
     start = time.time()
     try:
         frames, _, vessel = run(ph.Params(**overrides), minutes, 0.5, "cpu", seed=seed)
         stats, _ = measure.summarize(frames.astype(np.float32) / 255, vessel, 2.0)
-        total, parts = score(stats, real)
+        total, parts = score_clips(stats)
     except RuntimeError as err:  # a non-finite run counts as a failure, not a crash
         stats, total, parts = None, float("inf"), {"error": str(err)}
     return {"constants": overrides, "score": total, "parts": parts, "seconds": time.time() - start}

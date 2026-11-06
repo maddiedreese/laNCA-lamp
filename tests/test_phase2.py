@@ -96,6 +96,14 @@ def test_wax_stuck_under_the_cap_is_not_a_free_blob():
     assert measure.per_frame(mask[None], vessel)["free_blobs"][0] == 1
 
 
+def test_phases_find_when_the_pool_first_rises():
+    fps = 1.0
+    series = {"free_blobs": np.zeros(60), "pool_top": np.full(60, 0.1)}
+    series["pool_top"][5:7] = 0.5  # a flicker, not a rise
+    series["pool_top"][30:] = 0.5
+    assert measure.phases(series, fps)["first_rise_s"] == 30.0
+
+
 def test_track_measures_rise_speed():
     masks, vessel = _blob_frames(speed=2)
     tr = measure.track(masks, vessel, fps=10.0)

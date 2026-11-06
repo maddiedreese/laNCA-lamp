@@ -521,10 +521,55 @@ of 8 seeds on the first clip, though 4 of 8 on the new one. Its lower scores on 
 saw show it generalizes, though most of the higher error there is first blob and merges. Height
 at 60 minutes remains wrong for both, at 0.52-0.66 against 0.32-0.33 real.
 
+**A warm-up target, slow liquid, and training on both clips.** Both recordings show the wax
+first rising at almost the same moment, 815 s and 817 s, and staying up for at least 10 s. That
+is far more repeatable than the first free blob, so the score gains `first_rise_s` at weight 2
+and first blob drops to weight 0.25. Scores now average over both clips, and they are not
+comparable with those above. One clip scored against the other gives 0.41.
+
+The leading explanation for the slow warm-up was liquid that warms more slowly than wax. A new
+constant, `cap_liquid`, gives the liquid more heat capacity, and flow carries heat and capacity
+together so temperature mixes by energy. It is off at its default of 1. Single lamps on the
+refit4 constants:
+
+| liquid heat capacity | height at 60 min | height at 90 min | note |
+|---|---|---|---|
+| real lamp | 0.32-0.33 | 0.52-0.55 | |
+| 1 | 0.64 | 0.59 | |
+| 1.25 | 0.48 | 0.57 | blobs wrong size, first rise 1747 s |
+| 1.5 | 0.17 | 0.59 | |
+| 1.5, heating x1.3 | 0.78 | 0.83 | wax parks at the top |
+| 2 | 0.09 | 0.12 | |
+| 4 or more | 0.05-0.06 | 0.05-0.07 | wax never rises |
+
+Slowing the liquid delays height, but it delays the first rise too, and more heating parks the
+wax high. A search scored on both clips (`refit7`, from 1.25 with 16 constants free) drove
+`cap_liquid` to its lower limit, which turns it off. Its constants are not kept. Training on both
+clips is new: `--clips` takes the recordings and `--temps` one baseline run per clip, iterations
+take turns, and each recording keeps its own glass shape and pool, since the masks differ by 780
+cells. The new clip's first frames are dark, so a physics run started from them has almost no
+wax and stays cold. Its starting temperatures are instead refit4's from the first clip, moved
+onto the new glass with each new cell taking its nearest old neighbor. Iteration 150 was the best
+checkpoint by 2-hour score on 2 seeds.
+
+| 8 seeds, in the first clip's glass | both clips: mean, median, worst | first clip mean | new clip mean | first rise (real 816 s) |
+|---|---|---|---|---|
+| refit4 physics | 2.21, 2.16, 3.29 | 1.91 | 2.51 | 826-1240 s |
+| refit4 + network, iteration 300 | **1.67, 1.48**, 3.18 | **1.37** | **1.97** | 682-1100 s |
+| `refit7` physics | 2.49, 2.37, 3.73 | | | 960-2023 s |
+| trained on both clips, iteration 150 | 2.04, 1.92, **2.91** | 1.78 | 2.30 | 1086-1447 s |
+
+Iteration 300 stays the best model, even on the clip it never trained on. Eight chaotic seeds
+can't separate it firmly from the two-clip model (a bootstrap puts the difference in means at
+-0.21 to +0.88), but nothing favors retraining. `refit7` gets the 60-minute height right (0.28-0.41)
+only by keeping wax low throughout: it reaches 0.32-0.44 at 90 minutes. All the others stay at
+0.47-0.66 at 60 minutes. Nothing here reproduces the slow climb or the new clip's plume, which
+stalls near height 0.39 for over 20 minutes, and neither latent heat nor slow liquid explains them.
+
 ## Footage
 
 All data comes from two self-recorded clips, listed in `footage/manifest.json` and credited in
-`footage/CREDITS.md`; training has used only the first so far. The raw videos (10.8 and 12.4 GB)
+`footage/CREDITS.md`; the best model so far trained on the first alone. The raw videos (10.8 and 12.4 GB)
 are not committed; place them at `footage/clips/<filename>` and run
 `uv run python footage/fetch.py` to verify their hashes.
 
